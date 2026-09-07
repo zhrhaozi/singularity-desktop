@@ -1,0 +1,17 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test movement and color parsing
+        run: ./scripts/test.sh
+      - name: Build Apple Silicon application
+        run: ./build.sh
+      - name: Verify signature
+        run: codesign --verify --deep --strict dist/奇点.app
