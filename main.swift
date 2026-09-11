@@ -284,7 +284,12 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         showSettings()
         codexBridge=CodexStateBridge(model:model)
         codexBridge?.start()
-        if CGPreflightScreenCaptureAccess(){enableCapture()}
+        if CGPreflightScreenCaptureAccess(){
+            enableCapture()
+        } else {
+            model.captureState="需要屏幕录制权限"
+            model.error="真实桌面扭曲需要屏幕录制权限。请点击「开启桌面透镜」，或在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许「奇点」。"
+        }
         NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main){[weak self] _ in self?.centerPet();self?.checkScreen()}
         log("APP_READY")
         if CommandLine.arguments.contains("--self-test") {runSelfTest()}
