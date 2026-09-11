@@ -44,6 +44,22 @@ vec2 rot(vec2 v, float a) {
     return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
+// A visible screen-space lens term layered on top of the geodesic mapping.
+// The ray tracer supplies the physical shadow and disk geometry; this term
+// keeps ordinary desktop text visibly bent at the edge of a small pet window,
+// where a fully physical far-field deflection would otherwise be sub-pixel.
+vec2 visibleLensOffset(vec2 p, float rh, float depth, float scale) {
+    float r = length(p);
+    if (r <= rh * 0.90) return vec2(0.0);
+    vec2 dir = p / max(r, 1e-4);
+    float bend = clamp(depth / 13.0, 0.45, 2.8) * scale;
+    float envelope = smoothstep(7.0 * rh, 0.78 * rh, r);
+    float falloff = pow(clamp(rh / max(r, 0.78 * rh), 0.0, 1.0), 1.18);
+    float radial = 0.52 * rh * bend * falloff * envelope;
+    float tangential = spin * 0.10 * rh * falloff * envelope;
+    return dir * radial + vec2(-dir.y, dir.x) * tangential;
+}
+
 // unit Lissajous wander: 2+2 incommensurate sines per axis, so the orbit
 // never visibly repeats; scale the argument for speed, the result for reach
 vec2 lissa(float t) {
@@ -177,6 +193,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         for (int i = 0; i < 3; i++) {
             float k   = 1.0 + (float(i) - 1.0) * ab;
             vec2  sp  = p - dir * defl * k;
+            sp += visibleLensOffset(p, rh, LENS_DEPTH, style == 3 ? 1.25 : 0.72) * window;
             vec2  suv = mirrorUV(center + sp / vec2(aspect, 1.0));
             term[i]   = desktopSample(suv)[i];
         }
@@ -291,6 +308,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             vec2 sp = vec2(q.x, -q.y);
             sp.x -= spin * rh * 0.28 * exp(-dot(p,p)/(rh*rh*10.0));
             sp = rot(sp, -frameDrag);
+            sp += visibleLensOffset(p, rh, LENS_DEPTH, style == 3 ? 1.25 : 0.72) * window;
             // the *displacement* is faded by window/shield, never the color —
             // a continuous warp leaves no seam at the work area or far field
             vec2  suv = mirrorUV(center + (p + (sp - p) * window * shield) / vec2(aspect, 1.0));
