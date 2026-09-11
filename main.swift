@@ -20,6 +20,11 @@ final class Model: ObservableObject {
     @Published var travelSpeed = UserDefaults.standard.object(forKey:"travelSpeed") as? Double ?? 35 {didSet{save()}}
     @Published var customColor = UserDefaults.standard.bool(forKey:"customColor") {didSet{save()}}
     @Published var colorHex = UserDefaults.standard.string(forKey:"colorHex") ?? "#FFAA55" {didSet{save()}}
+    @Published var codexAuto = UserDefaults.standard.object(forKey:"codexAuto") as? Bool ?? true { didSet { save(); appDelegate?.codexBridge?.restartIfNeeded() } }
+    @Published var codexState: CodexActivityState = .idle
+    @Published var codexSource = "等待 Codex 桌面状态"
+    @Published var codexDetail = ""
+    @Published var codexPulse: Double = 0
     var hasSpin:Bool {kind==1 || kind==3}
     var hasCharge:Bool {kind==2 || kind==3}
     var effectiveCharge:Double {hasCharge ? min(charge,sqrt(max(0,0.98*0.98-pow(hasSpin ? spin:0,2)))):0}
@@ -28,8 +33,16 @@ final class Model: ObservableObject {
     @Published var captureState = "尚未开启桌面透镜"
     @Published var capturing = false
     @Published var error = ""
-    func save() { let d=UserDefaults.standard; d.set(size,forKey:"size");d.set(lens,forKey:"lens");d.set(speed,forKey:"speed");d.set(brightness,forKey:"brightness");d.set(tilt,forKey:"tilt");d.set(roll,forKey:"roll");d.set(style,forKey:"style");d.set(kind,forKey:"kind");d.set(spin,forKey:"spin");d.set(charge,forKey:"charge");d.set(mass,forKey:"mass");d.set(wander,forKey:"wander");d.set(travelSpeed,forKey:"travelSpeed");d.set(customColor,forKey:"customColor");d.set(colorHex,forKey:"colorHex") }
-    func reset() { size=440;lens=13;speed=0.6;brightness=2.2;tilt=1.48;roll=0.18;style=0;kind=0;spin=0.7;charge=0.5;mass=1;wander=false;travelSpeed=35;customColor=false;colorHex="#FFAA55";appDelegate?.centerPet() }
+    func save() { let d=UserDefaults.standard; d.set(size,forKey:"size");d.set(lens,forKey:"lens");d.set(speed,forKey:"speed");d.set(brightness,forKey:"brightness");d.set(tilt,forKey:"tilt");d.set(roll,forKey:"roll");d.set(style,forKey:"style");d.set(kind,forKey:"kind");d.set(spin,forKey:"spin");d.set(charge,forKey:"charge");d.set(mass,forKey:"mass");d.set(wander,forKey:"wander");d.set(travelSpeed,forKey:"travelSpeed");d.set(customColor,forKey:"customColor");d.set(colorHex,forKey:"colorHex");d.set(codexAuto,forKey:"codexAuto") }
+    func setCodexState(_ next:CodexActivityState,_ source:String,_ detail:String="") {
+        let changed = codexState != next
+        codexState = next
+        codexSource = source
+        codexDetail = detail
+        if changed && (next == .complete || next == .error) { codexPulse = 1.0 }
+    }
+    func setCodexState(_ next:CodexActivityState, source:String, detail:String="") { setCodexState(next, source, detail) }
+    func reset() { size=440;lens=13;speed=0.6;brightness=2.2;tilt=1.48;roll=0.18;style=0;kind=0;spin=0.7;charge=0.5;mass=1;wander=false;travelSpeed=35;customColor=false;colorHex="#FFAA55";codexAuto=true;setCodexState(.idle, source:"等待 Codex 桌面状态");appDelegate?.centerPet() }
 }
 let model=Model()
 var appDelegate: AppDelegate?
@@ -138,6 +151,7 @@ final class PetView:NSOpenGLView {
         let dt=min(0.1,max(0,now-lastTick));lastTick=now
         guard let w=window,w.isVisible else{return}
         if !model.paused {clock += Float(model.speed*dt)}
+        if model.codexPulse > 0 { model.codexPulse = max(0, model.codexPulse - dt * 2.2) }
         let pointer=w.convertPoint(fromScreen:NSEvent.mouseLocation)
         let hovering=hypot(pointer.x-bounds.midX,pointer.y-bounds.midY)<bounds.width*0.29
         if model.wander && !dragging && !hovering && !(appDelegate?.settings?.isVisible ?? false),let screen=w.screen {
@@ -162,6 +176,7 @@ final class PetView:NSOpenGLView {
         glUniform1i(glGetUniformLocation(program,"desktop"),0);glUniform2f(glGetUniformLocation(program,"iResolution"),Float(width),Float(height))
         uniform("iTime",clock);uniform("LENS_DEPTH",Float(model.lens));uniform("temperature",model.style == 1 ? 15000:5500);uniform("inclination",Float(model.tilt));uniform("rollAngle",Float(model.roll));uniform("brightness",Float(model.brightness))
         uniform("spin",Float(model.hasSpin ? model.spin:0));uniform("charge",Float(model.effectiveCharge));uniform("massScale",Float(model.mass))
+        uniform("codexEnergy",model.codexState.energy);uniform("codexTrail",model.codexState.trail);uniform("codexParticles",model.codexState.particleDensity);uniform("codexPulse",Float(model.codexPulse));glUniform1i(glGetUniformLocation(program,"codexState"),GLint(model.codexState.rawValue))
         let rgb=RGB(hex:model.colorHex) ?? RGB(hex:"#FFAA55")!
         glUniform3f(glGetUniformLocation(program,"customRGB"),Float(rgb.r),Float(rgb.g),Float(rgb.b))
         glUniform1i(glGetUniformLocation(program,"useCustomColor"),model.customColor ? 1:0)
@@ -201,6 +216,18 @@ struct SettingsView:View {
                     Button("打开屏幕录制设置"){NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)}
                     Button("在访达中显示当前应用"){NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
                 }.font(.system(size:11))}}.padding(14).background(Color.white.opacity(0.045),in:RoundedRectangle(cornerRadius:10))
+            VStack(alignment:.leading,spacing:11){
+                HStack{Text("Codex 状态联动").font(.headline);Spacer();Text(state.codexState.label).font(.system(size:11,design:.monospaced)).foregroundStyle(accent)}
+                Toggle("自动检测 Codex 桌面状态",isOn:$state.codexAuto).tint(accent)
+                if !state.codexAuto {
+                    Picker("预览状态",selection:Binding(get:{state.codexState.rawValue},set:{raw in if let next=CodexActivityState(rawValue:raw){state.setCodexState(next,source:"手动预览",detail:"")}})) {
+                        ForEach(CodexActivityState.allCases,id:\.rawValue){item in Text(item.label).tag(item.rawValue)}
+                    }
+                }
+                Text("来源：\(state.codexSource)").font(.system(size:11)).foregroundStyle(.secondary)
+                if !state.codexDetail.isEmpty {Text(state.codexDetail).font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary).lineLimit(2)}
+                Text("自动模式通过本机 Codex 渲染器状态判断；无法连接时保持空闲，不读取对话内容。").font(.system(size:11)).foregroundStyle(.secondary)
+            }.padding(14).background(Color.white.opacity(0.035),in:RoundedRectangle(cornerRadius:10))
             VStack(alignment:.leading,spacing:13){
                 Text("黑洞分型").font(.headline)
                 Picker("黑洞类型",selection:$state.kind){Text("史瓦西 · Schwarzschild").tag(0);Text("旋转 · Kerr").tag(1);Text("带电 · Reissner–Nordström").tag(2);Text("旋转带电 · Kerr–Newman").tag(3)}
@@ -227,8 +254,8 @@ struct SettingsView:View {
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"\(Int(state.size * 0.17)) pt 事件视界");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v1.1").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
-        }.padding(26)}.frame(width:520,height:740).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v1.2").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+        }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
 
@@ -238,6 +265,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     var settings:NSWindow!
     var status:NSStatusItem!
     let capture=Capture()
+    var codexBridge:CodexStateBridge?
     func applicationDidFinishLaunching(_ notification:Notification) {
         let menu=NSMenu();let top=NSMenuItem();menu.addItem(top);let submenu=NSMenu();top.submenu=submenu
         submenu.addItem(withTitle:"关于奇点",action:#selector(about),keyEquivalent:"");submenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");submenu.addItem(.separator());submenu.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");NSApp.mainMenu=menu
@@ -254,6 +282,8 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         settings.level=NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue+1);settings.title="奇点 · 黑洞控制室";settings.contentView=NSHostingView(rootView:SettingsView(state:model));settings.isReleasedWhenClosed=false;settings.center();settings.appearance=NSAppearance(named:.darkAqua)
         status=NSStatusBar.system.statusItem(withLength:NSStatusItem.squareLength);status.button?.image=NSImage(systemSymbolName:"circle.circle",accessibilityDescription:"奇点");status.menu=makeMenu()
         showSettings()
+        codexBridge=CodexStateBridge(model:model)
+        codexBridge?.start()
         if CGPreflightScreenCaptureAccess(){enableCapture()}
         NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main){[weak self] _ in self?.centerPet();self?.checkScreen()}
         log("APP_READY")
@@ -270,6 +300,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func resizePet(){guard pet != nil else{return};let center=NSPoint(x:pet.frame.midX,y:pet.frame.midY);pet.setFrame(NSRect(x:center.x-model.size/2,y:center.y-model.size/2,width:model.size,height:model.size),display:true);savePosition()}
     func savePosition(){guard pet != nil else{return};UserDefaults.standard.set(pet.frame.minX,forKey:"x");UserDefaults.standard.set(pet.frame.minY,forKey:"y")}
     func enableCapture(){guard let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen)}}
+    func restartCodexBridge(){codexBridge?.restartIfNeeded()}
     func checkScreen(){guard model.capturing,let s=pet.screen else{return};let id=(s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0;if id != capture.displayID {enableCapture()}}
     func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){
         let old=model.size;model.size=360;assert(abs(self.pet.frame.width-360)<1);model.size=old

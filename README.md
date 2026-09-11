@@ -25,10 +25,28 @@ A native macOS black-hole desktop pet with live desktop lensing, draggable posit
 | 自定义颜色 | macOS 颜色选择器、`#RRGGBB` 或 `#RGB` 输入 |
 | 桌面漫游 | 5–180 pt/s；随机转向、边缘随机向内折返 |
 | 交互 | 拖动、双击/右键设置、菜单栏入口、隐藏、参数与位置保存 |
+| Codex 状态联动 | 空闲、思考、运行命令、长任务、完成、出错；映射能量、粒子、拖影与结果事件 |
 
 关闭设置后开始漫游。鼠标靠近、拖动或打开设置时暂停，方便操作；隐藏时停止桌面采样。移动范围限定在当前显示器的可用区域，避开菜单栏和 Dock。
 
 自定义颜色只作用于吸积盘，保留背景原色。**纯透镜模式没有吸积盘，选择其他风格才能看到盘色变化。** 错误 HEX 输入会保留上次有效颜色。
+
+## Codex 状态联动
+
+设置中的「自动检测 Codex 桌面状态」默认开启。应用通过 `127.0.0.1:9229` 的本机渲染器调试端点只识别界面状态标记，不读取或保存对话内容；端点不可用时保持空闲。
+
+状态映射为：空闲 = 慢旋转与轻微透镜；思考 = 盘面升温、粒子增加；运行命令 = 物质流加速并出现内落碎片；长任务 = 时间膨胀拖影；完成 = 短暂结果闪光；出错 = 吸积盘抖动与闪烁。
+
+如果 Codex 运行环境没有开放本地渲染器状态，也可以通过状态桥接命令写入本机状态文件：
+
+```sh
+./singularity-codex-state thinking
+./singularity-codex-state command "running shell"
+./singularity-codex-state complete
+./singularity-codex-state idle
+```
+
+支持 `idle`、`thinking`、`command`、`long`、`complete`、`error`。状态文件位置为 `~/Library/Application Support/Singularity/codex-state.json`，超过 12 秒未更新会自动失效并回退到 Codex 桌面状态检测。
 
 ## 物理模型的范围
 
@@ -73,9 +91,10 @@ open dist/奇点.app
 - ScreenCaptureKit：采集显示器画面，排除宠物窗口以避免反馈。
 - OpenGL 3.2：渲染上游 GLSL 的适配版本。OpenGL 已被 Apple 弃用，此版本仍使用它；长期迁移目标可考虑 Metal。
 - `Behavior.swift`：颜色解析、随机漫游和边界约束。
+- `CodexState.swift`：Codex 状态识别、本地状态桥接与动效状态机。
 - `scripts/test.sh`：颜色合法性、速度单位、负坐标屏幕及连续 16 万步边界检查。
 
-1.1 已在 Apple Silicon macOS 上验证启动、授权后桌面透镜、自定义颜色和实际移动。多实体显示器切换未实测；目标 30 FPS，实际性能因设备和负载不同而变化。CI 检查编译及纯逻辑测试，不代替桌面视觉验证。
+1.2 已在 Apple Silicon macOS 上验证启动、OpenGL 着色器链接、Codex 状态桥接、授权后桌面透镜、自定义颜色和实际移动。多实体显示器切换未实测；目标 30 FPS，实际性能因设备和负载不同而变化。CI 检查编译及纯逻辑测试，不代替桌面视觉验证。
 
 ## 致谢与许可
 

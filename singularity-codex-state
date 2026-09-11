@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+
+STATE_DIR="${SINGULARITY_STATE_DIR:-$HOME/Library/Application Support/Singularity}"
+STATE_FILE="$STATE_DIR/codex-state.json"
+STATE="${1:-idle}"
+DETAIL="${2:-}"
+
+case "$STATE" in
+  idle|thinking|command|long|complete|error) ;;
+  *)
+    echo "usage: $0 {idle|thinking|command|long|complete|error} [detail]" >&2
+    exit 2
+    ;;
+esac
+
+mkdir -p "$STATE_DIR"
+DETAIL_SAFE=${DETAIL//\\/\\\\}
+DETAIL_SAFE=${DETAIL_SAFE//\"/\\\"}
+printf '{"state":"%s","detail":"%s","updatedAt":%s}\n' "$STATE" "$DETAIL_SAFE" "$(date +%s)" > "$STATE_FILE"
+echo "$STATE_FILE"

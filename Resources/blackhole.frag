@@ -6,6 +6,8 @@ uniform float iTime, LENS_DEPTH, temperature, inclination, rollAngle, brightness
 uniform int style, hasCapture, useCustomColor;
 uniform float spin, charge, massScale;
 uniform vec3 customRGB;
+uniform int codexState;
+uniform float codexEnergy, codexTrail, codexParticles, codexPulse;
 out vec4 outputColor;
 vec4 desktopSample(vec2 uv) {
  if(hasCapture == 0) return vec4(0.0);
@@ -78,11 +80,49 @@ vec3 stars(vec3 d) {
     return tint * spark * tw * ((h - 0.92) / 0.08);
 }
 
+// A restrained particle field that only appears near the disk. It is driven
+// by Codex state intensity, so the same black-hole geometry reads as quiet,
+// busy, waiting, successful, or unstable without changing the model itself.
+vec3 codexDust(vec2 p, float rh, float t) {
+    float radius = length(p);
+    float visibility = smoothstep(0.05, 0.95, codexParticles);
+    float outc = 0.0;
+    float instability = codexState == 5 ? 1.0 : 0.0;
+    for (int i = 0; i < 14; i++) {
+        float fi = float(i);
+        float phase = fi * 2.399963 + t * (0.18 + codexEnergy * 0.88) * (i % 2 == 0 ? 1.0 : -1.0);
+        float ring = rh * (2.10 + 1.50 * fract(sin(fi * 17.13) * 43758.5453));
+        ring += sin(t * 1.7 + fi * 3.2) * rh * 0.11 * instability;
+        vec2 c = vec2(cos(phase), sin(phase)) * ring;
+        float size = rh * (0.025 + 0.025 * fract(sin(fi * 8.1) * 912.4));
+        float spark = exp(-dot(p - c, p - c) / max(size * size, 1e-4));
+        outc += spark * (0.24 + 0.95 * codexParticles) * smoothstep(0.0, 1.0, visibility);
+    }
+    // Command mode gets a few inward-falling fragments; error mode jitters.
+    if (codexState == 2 || codexState == 5) {
+        float fallPhase = fract(t * (0.14 + codexEnergy * 0.34));
+        for (int j = 0; j < 4; j++) {
+            float fj = float(j);
+            float a = fj * 1.57 + t * 0.22;
+            float rr = rh * mix(4.9, 1.65, fract(fallPhase + fj * 0.21));
+            vec2 c = vec2(cos(a), sin(a)) * rr;
+            float spark = exp(-dot(p - c, p - c) / max(rh * rh * 0.012, 1e-4));
+            outc += spark * (0.35 + 0.65 * codexParticles);
+        }
+    }
+    vec3 dustColor = codexState == 3 ? vec3(0.66, 0.55, 1.0) :
+                     (codexState == 4 ? vec3(0.62, 1.0, 0.72) : vec3(1.0, 0.64, 0.32));
+    return dustColor * outc * visibility * (0.34 + 0.72 * codexEnergy);
+}
+
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
  vec2 uv = fragCoord / iResolution;
  float aspect = iResolution.x / iResolution.y;
  float t = iTime;
  DiskLook L = DiskLook(temperature, inclination, rollAngle, 1.8, 8.0, 0.9, 0.6, 2.5, brightness, 1.6, 7.0, 5.0, 1.4, 0.0);
+ L.gain *= 1.0 + codexEnergy * 0.52;
+ L.opac *= 1.0 + codexEnergy * 0.16;
+ L.speed *= 1.0 + codexEnergy * 0.34;
  if(style == 2) { L.incl = 0.45; L.inner = 2.2; L.outer = 6.0; }
  if(style == 3) { L.gain = 0.0; L.opac = 0.0; }
  L.dopp = clamp(L.dopp + abs(spin)*0.35, 0.0, 1.0);
@@ -264,7 +304,20 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // disk light is HDR; tonemap it on top of the (untouched) terminal sample
     vec3 diskLight = vec3(1.0) - exp(-emitc * L.expo);
     if(useCustomColor == 1) diskLight = customRGB * max(diskLight.r,max(diskLight.g,diskLight.b));
-    vec3 col = bg * trans + diskLight;
+    // Time-dilation echoes are deliberately local: they smear the desktop
+    // around the pet without turning the whole screen into a moving filter.
+    vec2 tangent = normalize(vec2(-p.y, p.x));
+    float echoMask = codexTrail * smoothstep(5.0 * rh, 0.25 * rh, plen) * smoothstep(0.01, 0.20, plen);
+    vec2 ghostA = mirrorUV(center + (p + tangent * rh * 0.70) / vec2(aspect, 1.0));
+    vec2 ghostB = mirrorUV(center + (p - tangent * rh * 0.92) / vec2(aspect, 1.0));
+    vec3 echo = (desktopSample(ghostA).rgb + desktopSample(ghostB).rgb) * 0.5;
+    vec3 ghostTint = codexState == 3 ? vec3(0.72, 0.60, 1.0) : vec3(0.95, 0.62, 0.34);
+    echo *= echoMask * 0.12 * ghostTint;
+
+    vec3 dust = codexDust(p, rh, t);
+    float pulseRing = exp(-pow((plen - rh * 2.15) / max(rh * 0.62, 1e-4), 2.0));
+    vec3 pulse = vec3(1.0, 0.78, 0.46) * codexPulse * pulseRing * 1.25;
+    vec3 col = bg * trans + diskLight + echo + dust + pulse;
     float a = hasCapture == 1 ? 1.0 : (captured ? 1.0 : clamp(max(col.r,max(col.g,col.b)) + 1.0-trans,0.0,1.0));
     fragColor = vec4(col, a);
 }
