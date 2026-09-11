@@ -11,7 +11,7 @@ A native macOS black-hole desktop pet with live desktop lensing, draggable posit
 从 [Releases](https://github.com/zhrhaozi/singularity-desktop/releases) 下载 DMG，将「奇点.app」拖到「应用程序」。
 
 - Apple Silicon（M 系列），macOS 13 或更高版本。
-- 本地 ad-hoc 签名，**未通过 Apple Developer ID 公证**。组织或系统安全策略可能阻止启动；请遵循设备的安全策略。
+- 本机有 Apple Development 证书时，构建会使用稳定签名；没有证书的环境会回退到 ad-hoc。两种构建都**未通过 Apple Developer ID 公证**，组织或系统安全策略可能阻止启动；请遵循设备的安全策略。
 - 录屏画面仅在本机内存中参与渲染，不保存、不上传，不采集系统音频。
 
 ## 功能
@@ -62,7 +62,7 @@ Schwarzschild 模式沿用上游着色器的数值光线积分。Kerr 及带电�
 2. 使用**上方录屏列表**的「＋」，选择 `/Applications/奇点.app`。
 3. 完成系统验证、开启权限，然后退出并重新打开奇点。
 
-ad-hoc 构建更新后可能出现“开关已开，但无法连接”，因为旧条目仍绑定旧二进制签名。此时通过系统设置移除**奇点这一项**，再添加当前应用并重启。不要修改系统 TCC 数据库或重置其他应用权限。
+使用同一 Apple Development 身份构建时，macOS 会把后续版本视为同一录屏权限身份，通常不需要每次重新登记。第一次安装稳定签名版本仍可能需要在系统设置中重新添加或开启「奇点」；如果使用没有证书的 ad-hoc 环境更新，旧条目仍可能绑定旧二进制签名，此时通过系统设置移除**奇点这一项**，再添加当前应用并重启。不要修改系统 TCC 数据库或重置其他应用权限。
 
 ## 从源码构建
 
@@ -94,7 +94,7 @@ open dist/奇点.app
 - `CodexState.swift`：Codex 状态识别、本地状态桥接与动效状态机。
 - `scripts/test.sh`：颜色合法性、速度单位、负坐标屏幕及连续 16 万步边界检查。
 
-1.2.1 已在 Apple Silicon macOS 上验证启动、OpenGL 着色器链接、Codex 状态桥接、授权后桌面透镜、自定义颜色和实际移动。多实体显示器切换未实测；目标 30 FPS，实际性能因设备和负载不同而变化。CI 检查编译及纯逻辑测试，不代替桌面视觉验证。
+1.2.2 已在 Apple Silicon macOS 上验证启动、OpenGL 着色器链接、Codex 状态桥接、授权后桌面透镜、自定义颜色和实际移动，并加入稳定签名优先策略。多实体显示器切换未实测；目标 30 FPS，实际性能因设备和负载不同而变化。CI 检查编译及纯逻辑测试，不代替桌面视觉验证。
 
 ## 致谢与许可
 
