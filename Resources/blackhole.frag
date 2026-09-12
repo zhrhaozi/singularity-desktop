@@ -1,4 +1,7 @@
 #version 150
+// Added uniforms: diskPhase, dustPhase, codexEnergySmooth,
+// codexTrailSmooth, codexParticlesSmooth.  The Swift renderer uploads these
+// continuously so visual state survives reconnects and renderer restarts.
 uniform sampler2D desktop;
 uniform vec2 iResolution;
 uniform vec4 captureRect;
@@ -8,6 +11,8 @@ uniform float spin, charge, massScale;
 uniform vec3 customRGB;
 uniform int codexState;
 uniform float codexEnergy, codexTrail, codexParticles, codexPulse;
+uniform float diskPhase, dustPhase;
+uniform float codexEnergySmooth, codexTrailSmooth, codexParticlesSmooth;
 out vec4 outputColor;
 vec4 desktopSample(vec2 uv) {
  if(hasCapture == 0) return vec4(0.0);
@@ -53,7 +58,7 @@ vec2 visibleLensOffset(vec2 p, float rh, float depth, float scale) {
     if (r <= rh * 0.90) return vec2(0.0);
     vec2 dir = p / max(r, 1e-4);
     float bend = clamp(depth / 13.0, 0.45, 2.8) * scale;
-    float envelope = smoothstep(7.0 * rh, 0.78 * rh, r);
+    float envelope = 1.0 - smoothstep(0.78 * rh, 7.0 * rh, r);
     float falloff = pow(clamp(rh / max(r, 0.78 * rh), 0.0, 1.0), 1.18);
     float radial = 0.52 * rh * bend * falloff * envelope;
     float tangential = spin * 0.10 * rh * falloff * envelope;
@@ -90,55 +95,88 @@ vec3 stars(vec3 d) {
     if (h < 0.92) return vec3(0.0);
     vec2 f   = fract(g) - 0.5;
     vec2 off = (vec2(hash21(id + 17.3), hash21(id + 31.7)) - 0.5) * 0.7;
-    float spark = smoothstep(0.10, 0.0, length(f - off));
+    float spark = 1.0 - smoothstep(0.0, 0.10, length(f - off));
     float tw    = 0.7 + 0.3 * sin(iTime * (0.5 + 2.0 * hash21(id + 5.1)) + 40.0 * h);
     vec3 tint   = mix(vec3(1.0, 0.82, 0.60), vec3(0.75, 0.85, 1.0), hash21(id + 2.9));
     return tint * spark * tw * ((h - 0.92) / 0.08);
 }
 
-// A restrained particle field that only appears near the disk. It is driven
-// by Codex state intensity, so the same black-hole geometry reads as quiet,
-// busy, waiting, successful, or unstable without changing the model itself.
-vec3 codexDust(vec2 p, float rh, float t) {
-    float radius = length(p);
-    float visibility = smoothstep(0.05, 0.95, codexParticles);
+// Project a point from disk-plane coordinates into the screen.  Inclination
+// makes the disk an ellipse, roll sets its major-axis orientation, and spin
+// gives the state particles a signed orbital direction without touching the
+// geodesic integrator below.
+vec2 projectDiskPoint(vec2 diskPoint, float diskCos, float diskRoll) {
+    return rot(vec2(diskPoint.x, diskPoint.y * diskCos), diskRoll);
+}
+
+// A restrained particle field that only appears near the projected disk. It
+// is state-driven, but its phase is supplied by the renderer so a reconnect
+// cannot make particles jump backwards or replay old motion.
+vec3 codexDust(vec2 p, float rh, float phase) {
+    float energy = clamp(codexEnergySmooth > 0.001 ? codexEnergySmooth : codexEnergy, 0.0, 1.0);
+    float particles = clamp(codexParticlesSmooth > 0.001 ? codexParticlesSmooth : codexParticles, 0.0, 1.0);
+    float visibility = smoothstep(0.05, 0.95, particles);
+    float diskInclination = style == 2 ? 0.45 : inclination;
+    float diskCos = clamp(abs(cos(diskInclination)), 0.16, 1.0);
+    // Keep the overlay in the same plane as the traced disk. Spin changes
+    // direction below; it must not make the particle plane wobble separately.
+    float diskRoll = rollAngle;
+    float shadowClear = smoothstep(1.10 * rh, 1.48 * rh, length(p));
     float outc = 0.0;
     float instability = codexState == 5 ? 1.0 : 0.0;
+    float spinSign = spin < 0.0 ? -1.0 : 1.0;
+    float orbitPhase = phase * spinSign * (0.72 + 0.28 * abs(spin));
+
     for (int i = 0; i < 14; i++) {
         float fi = float(i);
-        float phase = fi * 2.399963 + t * (0.18 + codexEnergy * 0.88) * (i % 2 == 0 ? 1.0 : -1.0);
+        float direction = i % 2 == 0 ? 1.0 : -1.0;
+        float particlePhase = fi * 2.399963 + orbitPhase * direction + spin * fi * 0.17;
         float ring = rh * (2.10 + 1.50 * fract(sin(fi * 17.13) * 43758.5453));
-        ring += sin(t * 1.7 + fi * 3.2) * rh * 0.11 * instability;
-        vec2 c = vec2(cos(phase), sin(phase)) * ring;
+        ring += sin(phase * 1.7 + fi * 3.2) * rh * 0.11 * instability;
+        vec2 cDisk = vec2(cos(particlePhase), sin(particlePhase)) * ring;
+        vec2 c = projectDiskPoint(cDisk, diskCos, diskRoll);
+        vec2 delta = p - c;
         float size = rh * (0.025 + 0.025 * fract(sin(fi * 8.1) * 912.4));
-        float spark = exp(-dot(p - c, p - c) / max(size * size, 1e-4));
-        outc += spark * (0.24 + 0.95 * codexParticles) * smoothstep(0.0, 1.0, visibility);
+        float minorSize = size * mix(0.34, 1.0, diskCos);
+        float spark = exp(-(delta.x * delta.x / max(size * size, 1e-4) +
+                            delta.y * delta.y / max(minorSize * minorSize, 1e-4)));
+        outc += spark * (0.24 + 0.95 * particles) * smoothstep(0.0, 1.0, visibility);
     }
-    // Command mode gets a few inward-falling fragments; error mode jitters.
-    if (codexState == 2 || codexState == 5) {
-        float fallPhase = fract(t * (0.14 + codexEnergy * 0.34));
+
+    // Command mode gets inward-falling fragments. Long-task state (3) keeps
+    // that same ingress structure while error mode adds a jittering phase.
+    if (codexState == 2 || codexState == 3 || codexState == 5) {
+        float fallPhase = fract(phase * 0.72);
         for (int j = 0; j < 4; j++) {
             float fj = float(j);
-            float a = fj * 1.57 + t * 0.22;
+            float errorJitter = codexState == 5 ? 0.16 * sin(phase * 3.7 + fj * 2.4) : 0.0;
+            float a = fj * 1.57 + spinSign * phase * 0.22 + errorJitter;
             float rr = rh * mix(4.9, 1.65, fract(fallPhase + fj * 0.21));
-            vec2 c = vec2(cos(a), sin(a)) * rr;
-            float spark = exp(-dot(p - c, p - c) / max(rh * rh * 0.012, 1e-4));
-            outc += spark * (0.35 + 0.65 * codexParticles);
+            vec2 cDisk = vec2(cos(a), sin(a)) * rr;
+            vec2 c = projectDiskPoint(cDisk, diskCos, diskRoll);
+            vec2 delta = p - c;
+            float minorSize = rh * 0.11 * mix(0.42, 1.0, diskCos);
+            float spark = exp(-(delta.x * delta.x / max(rh * rh * 0.012, 1e-4) +
+                                delta.y * delta.y / max(minorSize * minorSize, 1e-4)));
+            outc += spark * (0.35 + 0.65 * particles);
         }
     }
+
     vec3 dustColor = codexState == 3 ? vec3(0.66, 0.55, 1.0) :
-                     (codexState == 4 ? vec3(0.62, 1.0, 0.72) : vec3(1.0, 0.64, 0.32));
-    return dustColor * outc * visibility * (0.34 + 0.72 * codexEnergy);
+                     (codexState == 4 ? vec3(0.62, 1.0, 0.72) :
+                     (codexState == 5 ? vec3(1.0, 0.30, 0.16) : vec3(1.0, 0.64, 0.32)));
+    return dustColor * outc * visibility * (0.34 + 0.72 * energy) * shadowClear;
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
  vec2 uv = fragCoord / iResolution;
  float aspect = iResolution.x / iResolution.y;
- float t = iTime;
+ float energy = clamp(codexEnergySmooth > 0.001 ? codexEnergySmooth : codexEnergy, 0.0, 1.0);
+ float trail = clamp(codexTrailSmooth > 0.001 ? codexTrailSmooth : codexTrail, 0.0, 1.0);
  DiskLook L = DiskLook(temperature, inclination, rollAngle, 1.8, 8.0, 0.9, 0.6, 2.5, brightness, 1.6, 7.0, 5.0, 1.4, 0.0);
- L.gain *= 1.0 + codexEnergy * 0.52;
- L.opac *= 1.0 + codexEnergy * 0.16;
- L.speed *= 1.0 + codexEnergy * 0.34;
+ L.gain *= 1.0 + energy * 0.52;
+ L.opac *= 1.0 + energy * 0.16;
+ L.speed *= 1.0 + energy * 0.34;
  if(style == 2) { L.incl = 0.45; L.inner = 2.2; L.outer = 6.0; }
  if(style == 3) { L.gain = 0.0; L.opac = 0.0; }
  L.dopp = clamp(L.dopp + abs(spin)*0.35, 0.0, 1.0);
@@ -180,6 +218,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // This is the same finite-camera mapping, fitted against the integrator
     // (sub-1% at the boundary): disp = (2/b)(1.29u + 0.07)(L - 2.14u + 0.75)
     // in world units, with u = Z0/sqrt(Z0^2 + b^2).
+    vec3 bg = vec3(0.0);
+    vec3 emitc = vec3(0.0);
+    float trans = 1.0;
+    bool captured = false;
     if (b >= bmax) {
         float u    = Z0 * inversesqrt(Z0 * Z0 + b * b);
         float defl = (2.0 / (W * W)) / max(plen, 1e-4)
@@ -200,9 +242,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // same starfield as the geodesic region, lit through the weak-field
         // bend so stars don't pop at the boundary circle
         vec3 d = normalize(vec3(-(pr / b) * (2.0 / b), -1.0));
-        fragColor = vec4(term + stars(d) * L.star * window * shield, hasCapture == 1 ? 1.0 : 0.0);
-        return;
-    }
+        bg = term + stars(d) * L.star * window * shield;
+    } else {
 
     // ====================== near field: trace the geodesic ==================
     // Parallel rays from a distant camera at +z. The hole is at the origin,
@@ -217,11 +258,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3  n  = vec3(0.0, si, ci);
     vec3  e2 = vec3(0.0, ci, -si);      // in-plane axis completing (x̂, e2, n)
     float sdir = L.speed < 0.0 ? -1.0 : 1.0;
-    float spd  = abs(L.speed);
 
-    vec3  emitc = vec3(0.0);            // accumulated disk light (HDR)
-    float trans = 1.0;                  // transmittance toward the background
-    bool  captured = false;
+    // accumulated disk light (HDR)
     float sPrev = dot(x, n);
     vec3  xPrev = x;
 
@@ -263,7 +301,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 // pattern visibly freezes toward the inner edge; dil winds the
                 // whole disk down as the hole grows
                 float gloc  = sqrt(max(1.0 - 1.5 / rc, 0.02));
-                float swirl = rc * L.wind * 0.12 - t * kep * spd * gloc * dil * sdir;
+                float swirl = rc * L.wind * 0.12 - diskPhase * kep * gloc * dil;
                 float streaks = vnoiseWrapY(vec2(rc * 2.8, turns * 19.0 + swirl * 3.0), 19.0) * 0.65 +
                                 vnoiseWrapY(vec2(rc * 1.0, turns * 9.0  + swirl * 1.5 + 7.0), 9.0) * 0.35;
                 streaks = 0.35 + L.contr * streaks * streaks;
@@ -295,7 +333,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     if (!captured && dot(x, x) < 4.0) captured = true;
 
     // ---- background: where did the escaped ray come from? ----
-    vec3 bg = vec3(0.0);
     if (!captured) {
         vec3 d = normalize(v);
         bg += stars(d) * L.star * window * shield;
@@ -318,24 +355,42 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             bg += desktopSample(suv).rgb * toward;
         }
     }
+    }
 
     // disk light is HDR; tonemap it on top of the (untouched) terminal sample
     vec3 diskLight = vec3(1.0) - exp(-emitc * L.expo);
     if(useCustomColor == 1) diskLight = customRGB * max(diskLight.r,max(diskLight.g,diskLight.b));
-    // Time-dilation echoes are deliberately local: they smear the desktop
-    // around the pet without turning the whole screen into a moving filter.
-    vec2 tangent = normalize(vec2(-p.y, p.x));
-    float echoMask = codexTrail * smoothstep(5.0 * rh, 0.25 * rh, plen) * smoothstep(0.01, 0.20, plen);
-    vec2 ghostA = mirrorUV(center + (p + tangent * rh * 0.70) / vec2(aspect, 1.0));
-    vec2 ghostB = mirrorUV(center + (p - tangent * rh * 0.92) / vec2(aspect, 1.0));
-    vec3 echo = (desktopSample(ghostA).rgb + desktopSample(ghostB).rgb) * 0.5;
-    vec3 ghostTint = codexState == 3 ? vec3(0.72, 0.60, 1.0) : vec3(0.95, 0.62, 0.34);
-    echo *= echoMask * 0.12 * ghostTint;
+    // Local procedural halo: it carries the long-task trail without sampling
+    // offset desktop texels, so the black-hole shadow stays uncontaminated by
+    // a second, misregistered copy of the work area.
+    float haloRadius = rh * (2.25 + 0.18 * abs(spin));
+    float haloWidth = max(rh * (0.36 + 0.16 * trail), 1e-4);
+    float haloBand = exp(-pow((plen - haloRadius) / haloWidth, 2.0));
+    float haloEdge = smoothstep(1.08 * rh, 1.36 * rh, plen) *
+                     (1.0 - smoothstep(5.2 * rh, 7.0 * rh, plen));
+    float haloAngle = atan(p.y, p.x);
+    float haloMotion = 0.72 + 0.28 * sin(dustPhase * (1.1 + 0.45 * abs(spin)) +
+                                             haloAngle * (2.0 + 1.5 * abs(spin)) + spin * 0.7);
+    vec3 haloColor = codexState == 3 ? vec3(0.72, 0.60, 1.0) :
+                     (codexState == 4 ? vec3(0.46, 1.0, 0.70) :
+                     (codexState == 5 ? vec3(1.0, 0.24, 0.12) : vec3(0.95, 0.62, 0.34)));
+    vec3 halo = haloColor * trail * haloBand * haloEdge * haloMotion * (0.12 + 0.28 * energy);
 
-    vec3 dust = codexDust(p, rh, t);
-    float pulseRing = exp(-pow((plen - rh * 2.15) / max(rh * 0.62, 1e-4), 2.0));
-    vec3 pulse = vec3(1.0, 0.78, 0.46) * codexPulse * pulseRing * 1.25;
-    vec3 col = bg * trans + diskLight + echo + dust + pulse;
+    vec3 dust = codexDust(p, rh, dustPhase);
+    float resultPhase = dustPhase + haloAngle * 0.35;
+    bool isComplete = codexState == 4;
+    bool isError = codexState == 5;
+    float pulseRadius = rh * (isError ? 2.04 + 0.14 * sin(resultPhase * 8.0) :
+                              (isComplete ? 2.15 + 0.035 * sin(resultPhase * 3.2) : 2.15));
+    float pulseWidth = rh * (isError ? 0.54 : (isComplete ? 0.62 : 0.60));
+    float pulseRing = exp(-pow((plen - pulseRadius) / max(pulseWidth, 1e-4), 2.0));
+    float pulseMotion = isError ? 0.84 + 0.28 * sin(resultPhase * 11.0 + haloAngle * 3.0) :
+                        (isComplete ? 0.94 + 0.08 * sin(resultPhase * 4.0 + haloAngle) : 1.0);
+    vec3 pulseColor = isComplete ? vec3(0.44, 1.0, 0.68) :
+                      (isError ? vec3(1.0, 0.22, 0.10) : vec3(1.0, 0.78, 0.46));
+    float pulseClear = smoothstep(1.08 * rh, 1.34 * rh, plen);
+    vec3 pulse = pulseColor * codexPulse * pulseRing * pulseMotion * pulseClear * 1.25;
+    vec3 col = bg * trans + diskLight + halo + dust + pulse;
     float a = hasCapture == 1 ? 1.0 : (captured ? 1.0 : clamp(max(col.r,max(col.g,col.b)) + 1.0-trans,0.0,1.0));
     fragColor = vec4(col, a);
 }

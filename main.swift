@@ -4,7 +4,7 @@ import ScreenCaptureKit
 import OpenGL.GL3
 import CoreMedia
 
-final class Model: ObservableObject {
+final class Model: ObservableObject, CodexStateModel {
     @Published var size: Double = UserDefaults.standard.object(forKey: "size") as? Double ?? 440 { didSet { save(); appDelegate?.resizePet() } }
     @Published var lens: Double = UserDefaults.standard.object(forKey: "lens") as? Double ?? 13 { didSet { save() } }
     @Published var speed: Double = UserDefaults.standard.object(forKey: "speed") as? Double ?? 0.6 { didSet { save() } }
@@ -103,12 +103,51 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 final class PetWindow:NSPanel {
     override var canBecomeKey:Bool {true}
     override var canBecomeMain:Bool {false}
+    // The overlay intentionally has transparent margins. Let it straddle a
+    // display edge; PetPlacement handles recovery when a display disappears.
+    override func constrainFrameRect(_ frameRect:NSRect,to screen:NSScreen?)->NSRect {frameRect}
 }
 final class PetView:NSOpenGLView {
+    private struct UniformLocations {
+        var desktop:GLint = -1
+        var iResolution:GLint = -1
+        var captureRect:GLint = -1
+        var iTime:GLint = -1
+        var lensDepth:GLint = -1
+        var temperature:GLint = -1
+        var inclination:GLint = -1
+        var rollAngle:GLint = -1
+        var brightness:GLint = -1
+        var spin:GLint = -1
+        var charge:GLint = -1
+        var massScale:GLint = -1
+        var codexState:GLint = -1
+        var codexEnergy:GLint = -1
+        var codexTrail:GLint = -1
+        var codexParticles:GLint = -1
+        var codexPulse:GLint = -1
+        var codexEnergySmooth:GLint = -1
+        var codexTrailSmooth:GLint = -1
+        var codexParticlesSmooth:GLint = -1
+        var diskPhase:GLint = -1
+        var dustPhase:GLint = -1
+        var customRGB:GLint = -1
+        var useCustomColor:GLint = -1
+        var style:GLint = -1
+        var hasCapture:GLint = -1
+    }
     var program:GLuint=0, vao:GLuint=0, textureID:GLuint=0
     var timer:Timer?
     var clock:Float=0
+    var diskPhase:Float=0
+    var dustPhase:Float=0
+    var codexEnergySmooth:Float=CodexActivityState.idle.energy
+    var codexTrailSmooth:Float=CodexActivityState.idle.trail
+    var codexParticlesSmooth:Float=CodexActivityState.idle.particleDensity
     var uploaded:CVPixelBuffer?
+    var textureWidth:GLsizei=1
+    var textureHeight:GLsizei=1
+    private var uniforms=UniformLocations()
     var dragStart=NSPoint.zero, originStart=NSPoint.zero
     var dragging=false
     var wanderState=Wander()
@@ -119,7 +158,7 @@ final class PetView:NSOpenGLView {
         self.capture=capture
         let attrs:[NSOpenGLPixelFormatAttribute]=[UInt32(NSOpenGLPFAOpenGLProfile),UInt32(NSOpenGLProfileVersion3_2Core),UInt32(NSOpenGLPFAAccelerated),UInt32(NSOpenGLPFADoubleBuffer),UInt32(NSOpenGLPFAColorSize),24,UInt32(NSOpenGLPFAAlphaSize),8,0]
         super.init(frame:frame,pixelFormat:NSOpenGLPixelFormat(attributes:attrs)!)!
-        wantsBestResolutionOpenGLSurface=false
+        wantsBestResolutionOpenGLSurface=true
     }
     required init?(coder:NSCoder) {fatalError()}
     override var isOpaque:Bool {false}
@@ -140,18 +179,68 @@ final class PetView:NSOpenGLView {
         program=glCreateProgram();glAttachShader(program,vertex);glAttachShader(program,fragment);glLinkProgram(program)
         var ok:GLint=0;glGetProgramiv(program,GLenum(GL_LINK_STATUS),&ok);log("GL_LINK \(ok)")
         glDeleteShader(vertex);glDeleteShader(fragment);glGenVertexArrays(1,&vao);glBindVertexArray(vao)
+        cacheUniformLocations()
         glGenTextures(1,&textureID);glBindTexture(GLenum(GL_TEXTURE_2D),textureID)
         glTexParameteri(GLenum(GL_TEXTURE_2D),GLenum(GL_TEXTURE_MIN_FILTER),GL_LINEAR);glTexParameteri(GLenum(GL_TEXTURE_2D),GLenum(GL_TEXTURE_MAG_FILTER),GL_LINEAR)
         glTexParameteri(GLenum(GL_TEXTURE_2D),GLenum(GL_TEXTURE_WRAP_S),GL_CLAMP_TO_EDGE);glTexParameteri(GLenum(GL_TEXTURE_2D),GLenum(GL_TEXTURE_WRAP_T),GL_CLAMP_TO_EDGE)
         let pixels:[UInt8]=[0,0,0,255];pixels.withUnsafeBytes{glTexImage2D(GLenum(GL_TEXTURE_2D),0,GL_RGBA8,1,1,0,GLenum(GL_BGRA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
         timer=Timer(timeInterval:1.0/30,repeats:true){[weak self] _ in self?.tick()};RunLoop.main.add(timer!,forMode:.common)
     }
+    private func cacheUniformLocations() {
+        uniforms.desktop=glGetUniformLocation(program,"desktop")
+        uniforms.iResolution=glGetUniformLocation(program,"iResolution")
+        uniforms.captureRect=glGetUniformLocation(program,"captureRect")
+        uniforms.iTime=glGetUniformLocation(program,"iTime")
+        uniforms.lensDepth=glGetUniformLocation(program,"LENS_DEPTH")
+        uniforms.temperature=glGetUniformLocation(program,"temperature")
+        uniforms.inclination=glGetUniformLocation(program,"inclination")
+        uniforms.rollAngle=glGetUniformLocation(program,"rollAngle")
+        uniforms.brightness=glGetUniformLocation(program,"brightness")
+        uniforms.spin=glGetUniformLocation(program,"spin")
+        uniforms.charge=glGetUniformLocation(program,"charge")
+        uniforms.massScale=glGetUniformLocation(program,"massScale")
+        uniforms.codexState=glGetUniformLocation(program,"codexState")
+        uniforms.codexEnergy=glGetUniformLocation(program,"codexEnergy")
+        uniforms.codexTrail=glGetUniformLocation(program,"codexTrail")
+        uniforms.codexParticles=glGetUniformLocation(program,"codexParticles")
+        uniforms.codexPulse=glGetUniformLocation(program,"codexPulse")
+        uniforms.codexEnergySmooth=glGetUniformLocation(program,"codexEnergySmooth")
+        uniforms.codexTrailSmooth=glGetUniformLocation(program,"codexTrailSmooth")
+        uniforms.codexParticlesSmooth=glGetUniformLocation(program,"codexParticlesSmooth")
+        uniforms.diskPhase=glGetUniformLocation(program,"diskPhase")
+        uniforms.dustPhase=glGetUniformLocation(program,"dustPhase")
+        uniforms.customRGB=glGetUniformLocation(program,"customRGB")
+        uniforms.useCustomColor=glGetUniformLocation(program,"useCustomColor")
+        uniforms.style=glGetUniformLocation(program,"style")
+        uniforms.hasCapture=glGetUniformLocation(program,"hasCapture")
+    }
+    @inline(__always) private func set1f(_ location:GLint,_ value:Float) { if location >= 0 { glUniform1f(location,value) } }
+    @inline(__always) private func set1i(_ location:GLint,_ value:GLint) { if location >= 0 { glUniform1i(location,value) } }
+    @inline(__always) private func set2f(_ location:GLint,_ x:Float,_ y:Float) { if location >= 0 { glUniform2f(location,x,y) } }
+    @inline(__always) private func set3f(_ location:GLint,_ x:Float,_ y:Float,_ z:Float) { if location >= 0 { glUniform3f(location,x,y,z) } }
+    @inline(__always) private func set4f(_ location:GLint,_ x:Float,_ y:Float,_ z:Float,_ w:Float) { if location >= 0 { glUniform4f(location,x,y,z,w) } }
+    private func advanceAnimation(dt:Double) {
+        guard !model.paused else { return }
+        let energy=Float(model.codexState.energy),trail=Float(model.codexState.trail),particles=Float(model.codexState.particleDensity)
+        // Exponential easing avoids visible jumps when the bridge changes state at poll boundaries.
+        let alpha=Float(1.0-exp(-dt/0.18))
+        codexEnergySmooth += (energy-codexEnergySmooth)*alpha
+        codexTrailSmooth += (trail-codexTrailSmooth)*alpha
+        codexParticlesSmooth += (particles-codexParticlesSmooth)*alpha
+        clock += Float(model.speed*dt)
+        let spinDirection=(model.hasSpin && model.spin < 0) ? -1.0 : 1.0
+        // Keep the old visual rates (the shader's disk wind was 5 rad/s at 1x)
+        // while integrating state-dependent terms here, where they cannot jump
+        // by multiplying a long-lived clock with a newly observed state.
+        diskPhase += Float(model.speed*dt*5.0*(1.0+0.34*Double(codexEnergySmooth))*spinDirection)
+        dustPhase += Float(model.speed*dt*(0.18+0.88*Double(codexEnergySmooth)))
+        if model.codexPulse > 0 { model.codexPulse=max(0,model.codexPulse-dt*2.2) }
+    }
     func tick() {
         let now=ProcessInfo.processInfo.systemUptime
         let dt=min(0.1,max(0,now-lastTick));lastTick=now
         guard let w=window,w.isVisible else{return}
-        if !model.paused {clock += Float(model.speed*dt)}
-        if model.codexPulse > 0 { model.codexPulse = max(0, model.codexPulse - dt * 2.2) }
+        advanceAnimation(dt:dt)
         let pointer=w.convertPoint(fromScreen:NSEvent.mouseLocation)
         let hovering=hypot(pointer.x-bounds.midX,pointer.y-bounds.midY)<bounds.width*0.29
         if model.wander && !dragging && !hovering && !(appDelegate?.settings?.isVisible ?? false),let screen=w.screen {
@@ -163,33 +252,50 @@ final class PetView:NSOpenGLView {
     }
     override func draw(_ dirtyRect:NSRect) {
         guard program != 0 else{return};openGLContext?.makeCurrentContext()
-        let width=GLsizei(bounds.width),height=GLsizei(bounds.height)
+        let backing=convertToBacking(bounds)
+        let width=GLsizei(max(1,Int(backing.width.rounded(.up)))),height=GLsizei(max(1,Int(backing.height.rounded(.up))))
         glViewport(0,0,width,height);glClearColor(0,0,0,0);glClear(GLbitfield(GL_COLOR_BUFFER_BIT))
         glUseProgram(program);glBindVertexArray(vao);glActiveTexture(GLenum(GL_TEXTURE0));glBindTexture(GLenum(GL_TEXTURE_2D),textureID)
         if let buffer=capture.latest(),uploaded !== buffer {
-            CVPixelBufferLockBaseAddress(buffer,.readOnly)
-            glPixelStorei(GLenum(GL_UNPACK_ROW_LENGTH),GLint(CVPixelBufferGetBytesPerRow(buffer)/4))
-            glTexImage2D(GLenum(GL_TEXTURE_2D),0,GL_RGBA8,GLsizei(CVPixelBufferGetWidth(buffer)),GLsizei(CVPixelBufferGetHeight(buffer)),0,GLenum(GL_BGRA),GLenum(GL_UNSIGNED_BYTE),CVPixelBufferGetBaseAddress(buffer))
-            glPixelStorei(GLenum(GL_UNPACK_ROW_LENGTH),0);CVPixelBufferUnlockBaseAddress(buffer,.readOnly);uploaded=buffer
+            let lockResult=CVPixelBufferLockBaseAddress(buffer,.readOnly)
+            if lockResult == kCVReturnSuccess {
+                var didUpload=false
+                if let base=CVPixelBufferGetBaseAddress(buffer) {
+                    let bufferWidth=GLsizei(CVPixelBufferGetWidth(buffer)),bufferHeight=GLsizei(CVPixelBufferGetHeight(buffer))
+                    glPixelStorei(GLenum(GL_UNPACK_ROW_LENGTH),GLint(CVPixelBufferGetBytesPerRow(buffer)/4))
+                    if textureWidth != bufferWidth || textureHeight != bufferHeight {
+                        glTexImage2D(GLenum(GL_TEXTURE_2D),0,GL_RGBA8,bufferWidth,bufferHeight,0,GLenum(GL_BGRA),GLenum(GL_UNSIGNED_BYTE),nil)
+                        textureWidth=bufferWidth;textureHeight=bufferHeight
+                    }
+                    glTexSubImage2D(GLenum(GL_TEXTURE_2D),0,0,0,bufferWidth,bufferHeight,GLenum(GL_BGRA),GLenum(GL_UNSIGNED_BYTE),base)
+                    glPixelStorei(GLenum(GL_UNPACK_ROW_LENGTH),0)
+                    didUpload=true
+                }
+                CVPixelBufferUnlockBaseAddress(buffer,.readOnly)
+                if didUpload { uploaded=buffer }
+            }
         }
-        func uniform(_ name:String,_ value:Float){glUniform1f(glGetUniformLocation(program,name),value)}
-        glUniform1i(glGetUniformLocation(program,"desktop"),0);glUniform2f(glGetUniformLocation(program,"iResolution"),Float(width),Float(height))
-        uniform("iTime",clock);uniform("LENS_DEPTH",Float(model.lens));uniform("temperature",model.style == 1 ? 15000:5500);uniform("inclination",Float(model.tilt));uniform("rollAngle",Float(model.roll));uniform("brightness",Float(model.brightness))
-        uniform("spin",Float(model.hasSpin ? model.spin:0));uniform("charge",Float(model.effectiveCharge));uniform("massScale",Float(model.mass))
-        uniform("codexEnergy",model.codexState.energy);uniform("codexTrail",model.codexState.trail);uniform("codexParticles",model.codexState.particleDensity);uniform("codexPulse",Float(model.codexPulse));glUniform1i(glGetUniformLocation(program,"codexState"),GLint(model.codexState.rawValue))
+        set1i(uniforms.desktop,0);set2f(uniforms.iResolution,Float(width),Float(height))
+        set1f(uniforms.iTime,clock);set1f(uniforms.lensDepth,Float(model.lens));set1f(uniforms.temperature,model.style == 1 ? 15000:5500);set1f(uniforms.inclination,Float(model.tilt));set1f(uniforms.rollAngle,Float(model.roll));set1f(uniforms.brightness,Float(model.brightness))
+        set1f(uniforms.spin,Float(model.hasSpin ? model.spin:0));set1f(uniforms.charge,Float(model.effectiveCharge));set1f(uniforms.massScale,Float(model.mass))
+        set1f(uniforms.codexEnergy,model.codexState.energy);set1f(uniforms.codexTrail,model.codexState.trail);set1f(uniforms.codexParticles,model.codexState.particleDensity);set1f(uniforms.codexPulse,Float(model.codexPulse));set1i(uniforms.codexState,GLint(model.codexState.rawValue))
+        set1f(uniforms.codexEnergySmooth,codexEnergySmooth);set1f(uniforms.codexTrailSmooth,codexTrailSmooth);set1f(uniforms.codexParticlesSmooth,codexParticlesSmooth);set1f(uniforms.diskPhase,diskPhase);set1f(uniforms.dustPhase,dustPhase)
         let rgb=RGB(hex:model.colorHex) ?? RGB(hex:"#FFAA55")!
-        glUniform3f(glGetUniformLocation(program,"customRGB"),Float(rgb.r),Float(rgb.g),Float(rgb.b))
-        glUniform1i(glGetUniformLocation(program,"useCustomColor"),model.customColor ? 1:0)
-        glUniform1i(glGetUniformLocation(program,"style"),GLint(model.style));glUniform1i(glGetUniformLocation(program,"hasCapture"),uploaded != nil && model.capturing ? 1:0)
-        if let w=window,capture.screenRect.width>0 {let s=capture.screenRect;glUniform4f(glGetUniformLocation(program,"captureRect"),Float((w.frame.minX-s.minX)/s.width),Float((s.maxY-w.frame.maxY)/s.height),Float(w.frame.width/s.width),Float(w.frame.height/s.height))}
+        set3f(uniforms.customRGB,Float(rgb.r),Float(rgb.g),Float(rgb.b))
+        set1i(uniforms.useCustomColor,model.customColor ? 1:0)
+        set1i(uniforms.style,GLint(model.style));set1i(uniforms.hasCapture,uploaded != nil && model.capturing ? 1:0)
+        if let w=window,capture.screenRect.width>0 {let s=capture.screenRect;set4f(uniforms.captureRect,Float((w.frame.minX-s.minX)/s.width),Float((s.maxY-w.frame.maxY)/s.height),Float(w.frame.width/s.width),Float(w.frame.height/s.height))}
         glDrawArrays(GLenum(GL_TRIANGLES),0,3);openGLContext?.flushBuffer()
+    }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties();openGLContext?.update();needsDisplay=true
     }
     override func mouseDown(with event:NSEvent) {
         if event.clickCount==2 {appDelegate?.showSettings();return}
         log("DRAG_BEGIN");dragging=true;dragStart=NSEvent.mouseLocation;originStart=window!.frame.origin
     }
     override func mouseDragged(with event:NSEvent) {let p=NSEvent.mouseLocation;window?.setFrameOrigin(NSPoint(x:originStart.x+p.x-dragStart.x,y:originStart.y+p.y-dragStart.y))}
-    override func mouseUp(with event:NSEvent) {dragging=false;log("DRAG_END x=\(window!.frame.minX) y=\(window!.frame.minY)");appDelegate?.savePosition();appDelegate?.checkScreen()}
+    override func mouseUp(with event:NSEvent) {dragging=false;log("DRAG_END x=\(window!.frame.minX) y=\(window!.frame.minY)");appDelegate?.savePosition();appDelegate?.screenParametersChanged()}
     override func rightMouseDown(with event:NSEvent) {if let menu=appDelegate?.makeMenu(){NSMenu.popUpContextMenu(menu,with:event,for:self)}}
 }
 
@@ -251,10 +357,10 @@ struct SettingsView:View {
                 }
             }.onAppear{hexInput=state.colorHex}.onChange(of:state.colorHex){hexInput=$0}
             VStack(alignment:.leading,spacing:12){Text("吸积盘风格").font(.system(size:12)).foregroundStyle(.secondary);Picker("",selection:$state.style){Text("炽金").tag(0);Text("冷蓝").tag(1);Text("星环").tag(2);Text("纯透镜").tag(3)}.pickerStyle(.segmented).labelsHidden()}
-            VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"\(Int(state.size * 0.17)) pt 事件视界");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
+            VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v1.2.2").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.3")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
@@ -276,7 +382,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         let d=UserDefaults.standard
         let savedX=d.object(forKey:"x") as? Double, savedY=d.object(forKey:"y") as? Double
         if let screen=NSScreen.main {pet.setFrameOrigin(NSPoint(x:screen.visibleFrame.minX+screen.visibleFrame.width*0.78-size/2,y:screen.visibleFrame.midY-size/2))}
-        if let x=savedX,let y=savedY {let proposed=NSRect(x:x,y:y,width:size,height:size);if NSScreen.screens.contains(where:{$0.visibleFrame.contains(NSPoint(x:proposed.midX,y:proposed.midY))}){pet.setFrameOrigin(proposed.origin)}}
+        if let x=savedX,let y=savedY {
+            let proposed=NSRect(x:x,y:y,width:size,height:size)
+            pet.setFrameOrigin(PetPlacement.recoveredOrigin(for:proposed,screens:petScreens))
+        }
         pet.orderFrontRegardless()
         settings=NSWindow(contentRect:NSRect(x:0,y:0,width:490,height:700),styleMask:[.titled,.closable,.miniaturizable],backing:.buffered,defer:false)
         settings.level=NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue+1);settings.title="奇点 · 黑洞控制室";settings.contentView=NSHostingView(rootView:SettingsView(state:model));settings.isReleasedWhenClosed=false;settings.center();settings.appearance=NSAppearance(named:.darkAqua)
@@ -290,23 +399,32 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
             model.captureState="需要屏幕录制权限"
             model.error="真实桌面扭曲需要屏幕录制权限。请点击「开启桌面透镜」，或在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许「奇点」。"
         }
-        NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main){[weak self] _ in self?.centerPet();self?.checkScreen()}
+        NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main){[weak self] _ in self?.screenParametersChanged()}
         log("APP_READY")
         if CommandLine.arguments.contains("--self-test") {runSelfTest()}
     }
     func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){settings?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.2",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.3",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){savePosition()}
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){model.visible.toggle();if model.visible{pet.orderFrontRegardless();if capture.stream != nil {enableCapture()}}else{pet.orderOut(nil);if let stream=capture.stream {Task{try? await stream.stopCapture()}}}}
     @objc func centerPet(){guard pet != nil,let s=NSScreen.main else{return};pet.setFrameOrigin(NSPoint(x:s.visibleFrame.midX-pet.frame.width/2,y:s.visibleFrame.midY-pet.frame.height/2));savePosition()}
     func resizePet(){guard pet != nil else{return};let center=NSPoint(x:pet.frame.midX,y:pet.frame.midY);pet.setFrame(NSRect(x:center.x-model.size/2,y:center.y-model.size/2,width:model.size,height:model.size),display:true);savePosition()}
     func savePosition(){guard pet != nil else{return};UserDefaults.standard.set(pet.frame.minX,forKey:"x");UserDefaults.standard.set(pet.frame.minY,forKey:"y")}
+    var petScreens:[PetScreen] {NSScreen.screens.map{PetScreen(frame:$0.frame,visibleFrame:$0.visibleFrame)}}
+    func screenParametersChanged(){
+        guard pet != nil else{return}
+        if !view.dragging {
+            let origin=PetPlacement.recoveredOrigin(for:pet.frame,screens:petScreens)
+            if origin != pet.frame.origin {pet.setFrameOrigin(origin);savePosition()}
+        }
+        checkScreen()
+    }
     func enableCapture(){guard let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen)}}
     func restartCodexBridge(){codexBridge?.restartIfNeeded()}
-    func checkScreen(){guard model.capturing,let s=pet.screen else{return};let id=(s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0;if id != capture.displayID {enableCapture()}}
+    func checkScreen(){guard model.capturing,let s=pet.screen else{return};let id=(s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0;if id != capture.displayID || s.frame != capture.screenRect {enableCapture()}}
     func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){
         let old=model.size;model.size=360;assert(abs(self.pet.frame.width-360)<1);model.size=old
         let origin=self.pet.frame.origin;self.pet.setFrameOrigin(NSPoint(x:origin.x+30,y:origin.y+20));assert(abs(self.pet.frame.minX-origin.x-30)<1);self.pet.setFrameOrigin(origin)

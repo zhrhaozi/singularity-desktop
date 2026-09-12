@@ -1,6 +1,38 @@
 import Foundation
 import CoreGraphics
 
+struct PetScreen {
+    let frame: CGRect
+    let visibleFrame: CGRect
+}
+
+enum PetPlacement {
+    static func recoveredOrigin(for pet: CGRect, screens: [PetScreen]) -> CGPoint {
+        let center = CGPoint(x: pet.midX, y: pet.midY)
+        // Transparent margins may extend offscreen while the black hole stays
+        // reachable. Preserve a valid saved origin across Dock/menu changes.
+        if screens.contains(where: { $0.frame.contains(center) }) { return pet.origin }
+
+        // A removed or resized display can strand the pet. Recover to the
+        // nearest usable edge while leaving a visible drag target.
+        var nearest: CGPoint?
+        var distance = CGFloat.infinity
+        for screen in screens where !screen.frame.isEmpty {
+            let visible = screen.visibleFrame.intersection(screen.frame)
+            let area = visible.isEmpty ? screen.frame : visible
+            let marginX = min(32, area.width / 2)
+            let marginY = min(32, area.height / 2)
+            let candidate = CGPoint(
+                x: min(area.maxX - marginX, max(area.minX + marginX, center.x)),
+                y: min(area.maxY - marginY, max(area.minY + marginY, center.y)))
+            let delta = hypot(candidate.x - center.x, candidate.y - center.y)
+            if delta < distance { nearest = candidate; distance = delta }
+        }
+        guard let recovered = nearest else { return pet.origin }
+        return CGPoint(x: recovered.x - pet.width / 2, y: recovered.y - pet.height / 2)
+    }
+}
+
 struct RGB: Equatable {
     let r: Double, g: Double, b: Double
     init?(hex: String) {

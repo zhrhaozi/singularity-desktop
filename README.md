@@ -46,7 +46,11 @@ A native macOS black-hole desktop pet with live desktop lensing, draggable posit
 ./singularity-codex-state idle
 ```
 
-支持 `idle`、`thinking`、`command`、`long`、`complete`、`error`。状态文件位置为 `~/Library/Application Support/Singularity/codex-state.json`，超过 12 秒未更新会自动失效并回退到 Codex 桌面状态检测。
+支持 `idle`、`thinking`、`command`、`long`、`complete`、`error`。状态文件位置为 `~/Library/Application Support/Singularity/codex-state.json`，以文件修改时间判定新鲜度，达到 12 秒未更新会失效并回退到 Codex 桌面状态检测；未来修改时间或无效输入不会取得状态优先权。
+
+完成必须由明确的 `complete` 事件表示：**忙碌后变为 `idle` 不再推断成功**，因为停止、取消也会回到空闲。当前 DOM 检测没有可靠的成功标记，自动模式需要通过上述状态桥接命令报告完成。`complete` 保持 1.4 秒，普通空闲轮询不会提前打断；新的任务可以覆盖旧完成状态。断联或观测超时只回退空闲，不触发完成。
+
+桥接命令使用 macOS 内置 JavaScript/Foundation 做 JSON 序列化与原子写入，支持多行、引号与控制字符，每次调用生成唯一 `eventID`。相同事件 ID 的重复快照不会再次触发结果或延长保持期；自定义生产者重试同一个事件时应复用 ID，新结果使用新 ID。旧格式（没有 `eventID`）仍可读取。错误状态保持到新的正常状态或来源失效，不因重复快照反复触发提示。结果去重为当前进程内的有界缓存，不保证应用退出重启后的持久去重。
 
 ## 物理模型的范围
 
@@ -92,9 +96,9 @@ open dist/奇点.app
 - OpenGL 3.2：渲染上游 GLSL 的适配版本。OpenGL 已被 Apple 弃用，此版本仍使用它；长期迁移目标可考虑 Metal。
 - `Behavior.swift`：颜色解析、随机漫游和边界约束。
 - `CodexState.swift`：Codex 状态识别、本地状态桥接与动效状态机。
-- `scripts/test.sh`：颜色合法性、速度单位、负坐标屏幕及连续 16 万步边界检查。
+- `scripts/test.sh`：颜色合法性、速度单位、负坐标屏幕及连续 16 万步边界检查，以及 Codex 六态解析、完成保持与去重、文件失效、断联回退、迟到响应、取消与 JSON 写入回归测试。测试使用独立文件夹、注入时钟与模拟探测器，不访问真实 Codex 或用户状态文件。
 
-1.2.2 已在 Apple Silicon macOS 上验证启动、OpenGL 着色器链接、Codex 状态桥接、授权后桌面透镜、自定义颜色和实际移动，并加入稳定签名优先策略。多实体显示器切换未实测；目标 30 FPS，实际性能因设备和负载不同而变化。CI 检查编译及纯逻辑测试，不代替桌面视觉验证。
+1.2.3 在 1.2.2 的基础上补齐 Codex 六态桥接、状态失效回退、完成事件保持与去重、原子状态文件写入，以及渲染连续性、盘面投影和 Retina 采样收尾。已在 Apple Silicon macOS 上验证逻辑回归、应用编译、OpenGL 着色器链接和签名；多实体显示器热切换与长时间 GPU 功耗仍需按具体设备实测，目标帧率为 30 FPS。
 
 ## 致谢与许可
 

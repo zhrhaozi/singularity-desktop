@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 STATE_DIR="${SINGULARITY_STATE_DIR:-$HOME/Library/Application Support/Singularity}"
 STATE_FILE="$STATE_DIR/codex-state.json"
@@ -9,13 +10,29 @@ DETAIL="${2:-}"
 case "$STATE" in
   idle|thinking|command|long|complete|error) ;;
   *)
-    echo "usage: $0 {idle|thinking|command|long|complete|error} [detail]" >&2
+    printf 'usage: %s {idle|thinking|command|long|complete|error} [detail]\n' "$0" >&2
     exit 2
     ;;
 esac
 
-mkdir -p "$STATE_DIR"
-DETAIL_SAFE=${DETAIL//\\/\\\\}
-DETAIL_SAFE=${DETAIL_SAFE//\"/\\\"}
-printf '{"state":"%s","detail":"%s","updatedAt":%s}\n' "$STATE" "$DETAIL_SAFE" "$(date +%s)" > "$STATE_FILE"
-echo "$STATE_FILE"
+# macOS built-ins only. Arguments are data, never interpolated into JavaScript.
+# Foundation writes through an atomic replacement so readers never see partial JSON.
+UPDATED_AT="$(date +%s)"
+EVENT_ID="$(/usr/bin/uuidgen)"
+exec /usr/bin/osascript -l JavaScript - "$STATE" "$DETAIL" "$STATE_FILE" "$UPDATED_AT" "$EVENT_ID" <<'JXA'
+ObjC.import("Foundation");
+function run(args) {
+    var path = $(args[2]);
+    var parent = path.stringByDeletingLastPathComponent;
+    var error = Ref();
+    if (!$.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(parent, true, $.NSDictionary.dictionary, error)) {
+        throw new Error("Cannot create state directory: " + ObjC.unwrap(error[0].localizedDescription));
+    }
+    var snapshot = {state: args[0], detail: args[1], updatedAt: Number(args[3]), eventID: args[4]};
+    var text = $(JSON.stringify(snapshot) + "\n");
+    if (!text.writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, error)) {
+        throw new Error("Cannot write state file: " + ObjC.unwrap(error[0].localizedDescription));
+    }
+    return args[2];
+}
+JXA
