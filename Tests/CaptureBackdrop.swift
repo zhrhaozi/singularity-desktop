@@ -4,6 +4,7 @@ import Cocoa
 final class BackdropView:NSView {
     var phase=0
     override func draw(_ dirtyRect:NSRect) {
+        if phase<12 {NSLog("CAPTURE_BACKDROP_DRAW phase=%d",phase)}
         for y in stride(from:0,to:Int(bounds.height),by:48) {
             for x in stride(from:0,to:Int(bounds.width),by:48) {
                 let alternate=(x/48+y/48+phase)%2 == 0
@@ -17,6 +18,7 @@ final class BackdropView:NSView {
 let app=NSApplication.shared
 app.setActivationPolicy(.accessory)
 let parent=getppid()
+NSLog("CAPTURE_BACKDROP_STARTED pid=%d parent=%d",getpid(),parent)
 var windows=[NSWindow]()
 for screen in NSScreen.screens {
     let window=NSWindow(contentRect:screen.frame,styleMask:.borderless,backing:.buffered,defer:false)

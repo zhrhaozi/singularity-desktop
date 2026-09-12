@@ -3,6 +3,8 @@
 // codexTrailSmooth, codexParticlesSmooth.  The Swift renderer uploads these
 // continuously so visual state survives reconnects and renderer restarts.
 uniform sampler2D desktop;
+uniform sampler2DRect desktopSurface;
+uniform int useDesktopSurface;
 uniform vec2 iResolution;
 uniform vec4 captureRect;
 uniform float iTime, LENS_DEPTH, temperature, inclination, rollAngle, brightness;
@@ -16,7 +18,9 @@ uniform float codexEnergySmooth, codexTrailSmooth, codexParticlesSmooth;
 out vec4 outputColor;
 vec4 desktopSample(vec2 uv) {
  if(hasCapture == 0) return vec4(0.0);
- return texture(desktop, captureRect.xy + uv * captureRect.zw);
+ vec2 sourceUV = captureRect.xy + uv * captureRect.zw;
+ if(useDesktopSurface == 1) return texture(desktopSurface, sourceUV * vec2(textureSize(desktopSurface)));
+ return texture(desktop, sourceUV);
 }
 #define N_STEPS 64
 struct DiskLook { float temp, incl, roll, inner, outer, opac, dopp, beam, gain, contr, wind, speed, expo, star; };

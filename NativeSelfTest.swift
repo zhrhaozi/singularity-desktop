@@ -35,6 +35,11 @@ enum NativeSelfTest {
         require(linked==1,"GL link status")
         renderChecks(app.view)
         recoveryPolicyChecks()
+        if CommandLine.arguments.contains("--self-test-render-only") {
+            log("SELF_TEST_PASS generated-texture renderer-only")
+            NSApp.terminate(nil)
+            return
+        }
         Task{@MainActor in
             if CGPreflightScreenCaptureAccess(),let screen=app.pet.screen ?? NSScreen.main {
                 let backdrop=launchBackdrop()
@@ -73,6 +78,18 @@ enum NativeSelfTest {
                 app.togglePet()
                 await waitForCapture(app,active:true)
                 await recoveryChecks(app,screen:screen)
+                await app.capture.start(screen:nil)
+                model.paused=true
+                try? await Task.sleep(nanoseconds:300_000_000)
+                let settled=app.view.drawnFrames
+                try? await Task.sleep(nanoseconds:400_000_000)
+                require(app.view.drawnFrames==settled,"paused unchanged view does not redraw")
+                model.paused=false
+                try? await Task.sleep(nanoseconds:200_000_000)
+                require(app.view.drawnFrames>settled,"resume redraws")
+                await app.capture.start(screen:screen,requestPermission:false)
+                await waitForCapture(app,active:true)
+                log("RENDER_SCHEDULING_TEST_PASS paused-static no-redraw resume-redraw")
                 log("CAPTURE_TEST_PASS pause rapid-reconnect stale-callback real-frames")
             } else {
                 log("CAPTURE_TEST_SKIPPED screen permission unavailable")
@@ -120,15 +137,23 @@ enum NativeSelfTest {
         if ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_FIXTURE"] != nil {
             let wasPaused=model.paused
             model.paused=true
-            let first=capturedRenderCheck(app.view)
-            var refreshed=false
-            for _ in 0..<12 {
+            var previousPixels=capturedRenderCheck(app.view)
+            var previousBuffer=capture.latest().map{ObjectIdentifier($0)}
+            var changedFrames=0,changedRenders=0
+            // Observe beyond the capture pool size to catch pinned IOSurfaces
+            // that render correctly initially but prevent subsequent frames.
+            for _ in 0..<50 {
                 try? await Task.sleep(nanoseconds:100_000_000)
-                if capturedRenderCheck(app.view) != first {refreshed=true;break}
+                let buffer=capture.latest().map{ObjectIdentifier($0)}
+                if buffer != previousBuffer {changedFrames+=1;previousBuffer=buffer}
+                let pixels=capturedRenderCheck(app.view)
+                if pixels != previousPixels {changedRenders+=1;previousPixels=pixels}
+                if changedFrames>=6 && changedRenders>=3 {break}
             }
             model.paused=wasPaused
-            require(refreshed,"recovered desktop texture continues updating while animation is paused")
-            log("CAPTURE_REFRESH_TEST_PASS live-generated-backdrop after-recovery")
+            log("CAPTURE_REFRESH_DIAGNOSTIC changed-frames=\(changedFrames) changed-renders=\(changedRenders)")
+            require(changedFrames>=6 && changedRenders>=3,"recovered desktop texture continuously updates beyond capture pool size while paused")
+            log("CAPTURE_REFRESH_TEST_PASS live-generated-backdrop after-recovery sustained-frames")
         }
         if let before {
             capture.stream(before,didStopWithError:NSError(domain:SCStreamErrorDomain,code:-3817))
@@ -192,8 +217,9 @@ enum NativeSelfTest {
             glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&color)
         }
         require(glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))==GL_FRAMEBUFFER_COMPLETE,"capture framebuffer")
-        func pixels(_ enabled:Bool)->[UInt8] {
-            view.renderFrame(width:280,height:280,useCapture:enabled)
+        let fixedFrame=view.capture.latest()
+        func pixels(_ enabled:Bool,cpu:Bool=false)->[UInt8] {
+            view.renderFrame(width:280,height:280,useCapture:enabled,captureBuffer:fixedFrame,forceCPUUpload:cpu)
             var bytes=[UInt8](repeating:0,count:280*280*4)
             bytes.withUnsafeMutableBytes{glReadPixels(0,0,280,280,GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
             return bytes
@@ -203,6 +229,14 @@ enum NativeSelfTest {
         view.uploaded=nil
         let with=pixels(true)
         require(view.uploaded != nil,"real frame uploaded by renderer")
+        let imported=view.usingDesktopSurface
+        let reference=pixels(true,cpu:true)
+        let maxDifference=zip(with,reference).map{abs(Int($0)-Int($1))}.max() ?? 0
+        require(maxDifference<=2,"shared texture matches CPU upload including orientation and color: \(maxDifference)")
+        if imported {log("TEXTURE_EQUIVALENCE_TEST_PASS zero-copy cpu-reference max-difference=\(maxDifference)")}
+        else {log("TEXTURE_ZERO_COPY_SKIPPED import unavailable; CPU fallback verified")}
+        view.uploaded=nil
+        _=pixels(true)
         var changed=0
         for pixel in stride(from:0,to:with.count,by:4) {
             if abs(Int(with[pixel])-Int(without[pixel]))>10 ||
@@ -237,13 +271,13 @@ enum NativeSelfTest {
             glBindFramebuffer(GLenum(GL_FRAMEBUFFER),GLuint(previous))
             glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&color)
         }
-        func pixels(_ size:Int)->[UInt8] {
+        func pixels(_ size:Int,buffer:CVPixelBuffer?=nil,cpu:Bool=false)->[UInt8] {
             glBindTexture(GLenum(GL_TEXTURE_2D),color)
             glTexImage2D(GLenum(GL_TEXTURE_2D),0,GL_RGBA8,GLsizei(size),GLsizei(size),0,GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),nil)
             glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER),GLenum(GL_COLOR_ATTACHMENT0),GLenum(GL_TEXTURE_2D),color,0)
             glDrawBuffer(GLenum(GL_COLOR_ATTACHMENT0));glReadBuffer(GLenum(GL_COLOR_ATTACHMENT0))
             require(glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))==GL_FRAMEBUFFER_COMPLETE,"framebuffer")
-            view.renderFrame(width:GLsizei(size),height:GLsizei(size),useCapture:false)
+            view.renderFrame(width:GLsizei(size),height:GLsizei(size),useCapture:buffer != nil,captureBuffer:buffer,forceCPUUpload:cpu)
             var bytes=[UInt8](repeating:0,count:size*size*4)
             bytes.withUnsafeMutableBytes{glReadPixels(0,0,GLsizei(size),GLsizei(size),GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
             require(glGetError()==GL_NO_ERROR,"GPU render/readback")
@@ -289,6 +323,34 @@ enum NativeSelfTest {
         model.paused=false;view.advanceAnimation(dt:0.1)
         require(pixels(280) != paused,"resume moves")
         log("RENDER_TEST_PASS \(cases) state/style/scale frames shadow transparency movement pause-resume")
+        let wasCapturing=model.capturing,oldRect=view.capture.screenRect
+        model.capturing=true
+        view.capture.screenRect=view.window?.frame ?? NSRect(x:0,y:0,width:280,height:280)
+        defer {model.capturing=wasCapturing;view.capture.screenRect=oldRect;view.uploaded=nil}
+        for shared in [true,false] {
+            var buffer:CVPixelBuffer?
+            let attributes:[String:Any]=shared ? [kCVPixelBufferIOSurfacePropertiesKey as String:[:]]:[:]
+            require(CVPixelBufferCreate(kCFAllocatorDefault,64,64,kCVPixelFormatType_32BGRA,attributes as CFDictionary,&buffer)==kCVReturnSuccess,"generated texture allocation")
+            guard let buffer else {require(false,"generated texture");return}
+            require(CVPixelBufferLockBaseAddress(buffer,[])==kCVReturnSuccess,"generated texture lock")
+            let base=CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to:UInt8.self)
+            let row=CVPixelBufferGetBytesPerRow(buffer)
+            for y in 0..<64 {
+                for x in 0..<64 {
+                    let offset=y*row+x*4
+                    base[offset]=UInt8(x*4);base[offset+1]=UInt8(y*4)
+                    base[offset+2]=UInt8((x/8+y/8)%2==0 ? 240:20);base[offset+3]=255
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer,[])
+            view.uploaded=nil
+            let imported=pixels(280,buffer:buffer)
+            require(view.usingDesktopSurface==shared,"IOSurface import or memory-buffer fallback")
+            let reference=pixels(280,buffer:buffer,cpu:true)
+            let maxDifference=zip(imported,reference).map{abs(Int($0)-Int($1))}.max() ?? 0
+            require(maxDifference<=2,"generated texture color/orientation equivalence \(maxDifference)")
+            log("TEXTURE_SYNTHETIC_TEST_PASS shared=\(shared) max-difference=\(maxDifference)")
+        }
     }
 
     static func savePNG(_ pixels:[UInt8],size:Int,name:String) {

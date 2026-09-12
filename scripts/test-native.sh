@@ -11,6 +11,8 @@ export SINGULARITY_CAPTURE_FIXTURE="$LOG_DIR/CaptureBackdrop"
 # The optimized app performs explicit checks, exits, and does not save preferences.
 "$APP/Contents/MacOS/Singularity" --pet-only --self-test > "$LOG_DIR/pass.log" 2>&1
 grep -F 'RENDER_TEST_PASS' "$LOG_DIR/pass.log"
+grep -F 'TEXTURE_SYNTHETIC_TEST_PASS shared=true' "$LOG_DIR/pass.log"
+grep -F 'TEXTURE_SYNTHETIC_TEST_PASS shared=false' "$LOG_DIR/pass.log"
 grep -F 'SELF_TEST_PASS' "$LOG_DIR/pass.log"
 grep -E 'CAPTURE_TEST_(PASS|SKIPPED)' "$LOG_DIR/pass.log"
 grep -F 'CAPTURE_POLICY_TEST_PASS' "$LOG_DIR/pass.log"
@@ -18,6 +20,8 @@ if grep -Fq 'CAPTURE_TEST_PASS' "$LOG_DIR/pass.log"; then
   grep -F 'CAPTURE_RECOVERY_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_REFRESH_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_RENDER_TEST_PASS' "$LOG_DIR/pass.log"
+  grep -E 'TEXTURE_(EQUIVALENCE_TEST_PASS|ZERO_COPY_SKIPPED)' "$LOG_DIR/pass.log"
+  grep -F 'RENDER_SCHEDULING_TEST_PASS' "$LOG_DIR/pass.log"
 fi
 if "$APP/Contents/MacOS/Singularity" --pet-only --self-test --self-test-fail > "$LOG_DIR/fail.log" 2>&1; then
   echo "FAIL: release self-test accepted an intentional failure" >&2
