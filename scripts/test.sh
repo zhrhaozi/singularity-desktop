@@ -13,7 +13,7 @@ for required in \
   'uniform float codexEnergySmooth, codexTrailSmooth, codexParticlesSmooth;' \
   'vec3 dust = codexDust(p, rh, dustPhase);' \
   'float swirl = rc * L.wind * 0.12 - diskPhase * kep * gloc * dil;'; do
-  if ! rg -Fq "$required" "$SHADER"; then
+  if ! grep -Fq "$required" "$SHADER"; then
     echo "FAIL: shader contract missing: $required" >&2
     exit 1
   fi
@@ -23,7 +23,7 @@ for forbidden in \
   'smoothstep(0.10, 0.0' \
   'smoothstep(5.0 * rh, 0.25 * rh' \
   'fragColor = vec4(term + stars(d)'; do
-  if rg -Fq "$forbidden" "$SHADER"; then
+  if grep -Fq "$forbidden" "$SHADER"; then
     echo "FAIL: shader regression pattern found: $forbidden" >&2
     exit 1
   fi

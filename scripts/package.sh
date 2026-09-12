@@ -12,4 +12,7 @@ hdiutil create -volname "奇点 Singularity $VERSION" -srcfolder "$STAGE" -ov -f
 ditto -c -k --sequesterRsrc --keepParent dist/奇点.app "dist/Singularity-$VERSION-AppleSilicon.zip"
 codesign --verify --deep --strict dist/奇点.app
 hdiutil verify "dist/Singularity-$VERSION-AppleSilicon.dmg"
-shasum -a 256 dist/*.dmg dist/*.zip > dist/SHA256SUMS.txt
+(
+  cd dist
+  shasum -a 256 "Singularity-$VERSION-AppleSilicon.dmg" "Singularity-$VERSION-AppleSilicon.zip" > SHA256SUMS.txt
+)

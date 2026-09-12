@@ -33,7 +33,7 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var captureState = "尚未开启桌面透镜"
     @Published var capturing = false
     @Published var error = ""
-    func save() { let d=UserDefaults.standard; d.set(size,forKey:"size");d.set(lens,forKey:"lens");d.set(speed,forKey:"speed");d.set(brightness,forKey:"brightness");d.set(tilt,forKey:"tilt");d.set(roll,forKey:"roll");d.set(style,forKey:"style");d.set(kind,forKey:"kind");d.set(spin,forKey:"spin");d.set(charge,forKey:"charge");d.set(mass,forKey:"mass");d.set(wander,forKey:"wander");d.set(travelSpeed,forKey:"travelSpeed");d.set(customColor,forKey:"customColor");d.set(colorHex,forKey:"colorHex");d.set(codexAuto,forKey:"codexAuto") }
+    func save() { guard !CommandLine.arguments.contains("--self-test") else {return};let d=UserDefaults.standard; d.set(size,forKey:"size");d.set(lens,forKey:"lens");d.set(speed,forKey:"speed");d.set(brightness,forKey:"brightness");d.set(tilt,forKey:"tilt");d.set(roll,forKey:"roll");d.set(style,forKey:"style");d.set(kind,forKey:"kind");d.set(spin,forKey:"spin");d.set(charge,forKey:"charge");d.set(mass,forKey:"mass");d.set(wander,forKey:"wander");d.set(travelSpeed,forKey:"travelSpeed");d.set(customColor,forKey:"customColor");d.set(colorHex,forKey:"colorHex");d.set(codexAuto,forKey:"codexAuto") }
     func setCodexState(_ next:CodexActivityState,_ source:String,_ detail:String="") {
         let changed = codexState != next
         codexState = next
@@ -55,8 +55,35 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     var screenRect=CGRect.zero
     var displayID: CGDirectDisplayID=0
     var busy=false
-    @MainActor func start(screen:NSScreen) async {
-        guard !busy else {return};busy=true;defer{busy=false}
+    private var requestedScreen:NSScreen?
+    private var requestSerial:UInt64=0
+    private var frameStream:SCStream?
+    private func acceptFrames(from source:SCStream?) {
+        lock.lock();defer{lock.unlock()}
+        frame=nil;frameStream=source
+    }
+    @MainActor func start(screen:NSScreen?) async {
+        requestedScreen=screen;requestSerial &+= 1
+        guard !busy else {return}
+        busy=true;defer{busy=false}
+        // Coalesce rapid hide/show/reconnect requests, but never drop the last one.
+        while true {
+            let serial=requestSerial
+            await transition(to:requestedScreen,serial:serial)
+            if serial == requestSerial {break}
+        }
+    }
+    @MainActor private func transition(to screen:NSScreen?,serial:UInt64) async {
+        let old=stream;stream=nil;acceptFrames(from:nil)
+        model.capturing=false
+        if let old {try? await old.stopCapture()}
+        guard serial == requestSerial else {return}
+        guard let screen else {
+            model.captureState="桌面透镜已暂停";model.error=""
+            log("CAPTURE_PAUSED")
+            return
+        }
+        model.captureState="正在连接桌面…"
         do {
             if !CGPreflightScreenCaptureAccess() {
                 log("PERMISSION_REQUEST bundle=\(Bundle.main.bundleIdentifier ?? "unknown") path=\(Bundle.main.bundlePath)")
@@ -68,11 +95,14 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
             }
             let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
+            guard serial == requestSerial else {return}
             let id=(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
             guard let display=content.displays.first(where:{$0.displayID==id}) else {throw NSError(domain:"Display unavailable",code:1)}
-            if let old=stream {try? await old.stopCapture()}; stream=nil
-            let own=content.windows.filter{$0.windowID == CGWindowID(appDelegate?.pet.windowNumber ?? 0)}
-            let filter=SCContentFilter(display:display,excludingWindows:own)
+            // Application exclusion survives hidden/new windows and prevents feedback
+            // before WindowServer's on-screen window list has caught up.
+            let own=content.applications.filter{$0.processID == ProcessInfo.processInfo.processIdentifier}
+            guard !own.isEmpty else {throw NSError(domain:"Application unavailable for capture exclusion",code:2)}
+            let filter=SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
             let config=SCStreamConfiguration()
             config.width=display.width;config.height=display.height
             config.pixelFormat=kCVPixelFormatType_32BGRA
@@ -80,23 +110,32 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             config.queueDepth=3;config.showsCursor=false;config.capturesAudio=false
             let next=SCStream(filter:filter,configuration:config,delegate:self)
             try next.addStreamOutput(self,type:.screen,sampleHandlerQueue:DispatchQueue(label:"singularity.capture"))
-            lock.lock();frame=nil;lock.unlock()
             screenRect=screen.frame;displayID=id;stream=next
+            acceptFrames(from:next)
             try await next.startCapture()
+            guard serial == requestSerial else {return}
             model.captureState="桌面透镜已连接";model.capturing=true;model.error=""
-            log("CAPTURE_STARTED display=\(id) excluded=\(own.count)")
+            log("CAPTURE_STARTED display=\(id) excludedApps=\(own.count)")
         } catch {
-            model.capturing=false;model.captureState="需要屏幕录制权限"
-            model.error="请在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许「奇点」，然后点击重连。\n\(error.localizedDescription)"
+            guard serial == requestSerial else {return}
+            if let failed=stream {stream=nil;acceptFrames(from:nil);try? await failed.stopCapture()}
+            guard serial == requestSerial else {return}
+            model.capturing=false;model.captureState="桌面连接失败"
+            model.error="请检查录屏权限和显示器连接，然后点击重连。\n\(error.localizedDescription)"
             log("CAPTURE_ERROR \(error)")
         }
     }
     func stream(_ stream:SCStream,didOutputSampleBuffer buffer:CMSampleBuffer,of type:SCStreamOutputType) {
         guard type == .screen,buffer.isValid, let image=CMSampleBufferGetImageBuffer(buffer) else{return}
         guard let attachments=CMSampleBufferGetSampleAttachmentsArray(buffer,createIfNecessary:false) as? [[SCStreamFrameInfo:Any]],let raw=attachments.first?[.status] as? Int,raw==SCFrameStatus.complete.rawValue else{return}
-        lock.lock();frame=image;lock.unlock()
+        lock.lock();defer{lock.unlock()}
+        if stream === frameStream {frame=image}
     }
-    func stream(_ stream:SCStream,didStopWithError error:Error) { DispatchQueue.main.async {model.capturing=false;model.captureState="桌面连接已中断，请重连";log("STREAM_STOP \(error)")} }
+    func stream(_ stream:SCStream,didStopWithError error:Error) { DispatchQueue.main.async {
+        guard stream === self.stream else {return}
+        self.stream=nil;self.acceptFrames(from:nil)
+        model.capturing=false;model.captureState="桌面连接已中断，请重连";log("STREAM_STOP \(error)")
+    } }
     func latest()->CVPixelBuffer? {lock.lock();defer{lock.unlock()};return frame}
 }
 
@@ -219,7 +258,7 @@ final class PetView:NSOpenGLView {
     @inline(__always) private func set2f(_ location:GLint,_ x:Float,_ y:Float) { if location >= 0 { glUniform2f(location,x,y) } }
     @inline(__always) private func set3f(_ location:GLint,_ x:Float,_ y:Float,_ z:Float) { if location >= 0 { glUniform3f(location,x,y,z) } }
     @inline(__always) private func set4f(_ location:GLint,_ x:Float,_ y:Float,_ z:Float,_ w:Float) { if location >= 0 { glUniform4f(location,x,y,z,w) } }
-    private func advanceAnimation(dt:Double) {
+    func advanceAnimation(dt:Double) {
         guard !model.paused else { return }
         let energy=Float(model.codexState.energy),trail=Float(model.codexState.trail),particles=Float(model.codexState.particleDensity)
         // Exponential easing avoids visible jumps when the bridge changes state at poll boundaries.
@@ -254,9 +293,13 @@ final class PetView:NSOpenGLView {
         guard program != 0 else{return};openGLContext?.makeCurrentContext()
         let backing=convertToBacking(bounds)
         let width=GLsizei(max(1,Int(backing.width.rounded(.up)))),height=GLsizei(max(1,Int(backing.height.rounded(.up))))
+        renderFrame(width:width,height:height,useCapture:true)
+        openGLContext?.flushBuffer()
+    }
+    func renderFrame(width:GLsizei,height:GLsizei,useCapture:Bool) {
         glViewport(0,0,width,height);glClearColor(0,0,0,0);glClear(GLbitfield(GL_COLOR_BUFFER_BIT))
         glUseProgram(program);glBindVertexArray(vao);glActiveTexture(GLenum(GL_TEXTURE0));glBindTexture(GLenum(GL_TEXTURE_2D),textureID)
-        if let buffer=capture.latest(),uploaded !== buffer {
+        if useCapture,let buffer=capture.latest(),uploaded !== buffer {
             let lockResult=CVPixelBufferLockBaseAddress(buffer,.readOnly)
             if lockResult == kCVReturnSuccess {
                 var didUpload=false
@@ -283,9 +326,9 @@ final class PetView:NSOpenGLView {
         let rgb=RGB(hex:model.colorHex) ?? RGB(hex:"#FFAA55")!
         set3f(uniforms.customRGB,Float(rgb.r),Float(rgb.g),Float(rgb.b))
         set1i(uniforms.useCustomColor,model.customColor ? 1:0)
-        set1i(uniforms.style,GLint(model.style));set1i(uniforms.hasCapture,uploaded != nil && model.capturing ? 1:0)
+        set1i(uniforms.style,GLint(model.style));set1i(uniforms.hasCapture,useCapture && uploaded != nil && model.capturing ? 1:0)
         if let w=window,capture.screenRect.width>0 {let s=capture.screenRect;set4f(uniforms.captureRect,Float((w.frame.minX-s.minX)/s.width),Float((s.maxY-w.frame.maxY)/s.height),Float(w.frame.width/s.width),Float(w.frame.height/s.height))}
-        glDrawArrays(GLenum(GL_TRIANGLES),0,3);openGLContext?.flushBuffer()
+        glDrawArrays(GLenum(GL_TRIANGLES),0,3)
     }
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties();openGLContext?.update();needsDisplay=true
@@ -318,7 +361,7 @@ struct SettingsView:View {
                 VStack(alignment:.leading,spacing:5){Text("奇点").font(.system(size:30,weight:.light,design:.serif));Text("S I N G U L A R I T Y").font(.system(size:10,design:.monospaced)).foregroundStyle(accent);Text("让一小片时空，停留在桌面。 ").font(.system(size:12)).foregroundStyle(.secondary)}
                 Spacer()
             }
-            VStack(alignment:.leading,spacing:10){HStack{Circle().fill(state.capturing ? Color.green:accent).frame(width:6,height:6);Text(state.captureState).font(.system(size:12));Spacer();Button(state.capturing ? "重连":"开启桌面透镜"){appDelegate?.enableCapture()}.controlSize(.small)};if !state.error.isEmpty {Text(state.error).font(.system(size:11)).foregroundStyle(accent).fixedSize(horizontal:false,vertical:true)};if !state.capturing {HStack {
+            VStack(alignment:.leading,spacing:10){HStack{Circle().fill(state.capturing ? Color.green:accent).frame(width:6,height:6);Text(state.captureState).font(.system(size:12));Spacer();Button(state.capturing ? "重连":"开启桌面透镜"){appDelegate?.enableCapture()}.controlSize(.small).disabled(!state.visible)};if !state.error.isEmpty {Text(state.error).font(.system(size:11)).foregroundStyle(accent).fixedSize(horizontal:false,vertical:true)};if !state.capturing && state.visible {HStack {
                     Button("打开屏幕录制设置"){NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)}
                     Button("在访达中显示当前应用"){NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
                 }.font(.system(size:11))}}.padding(14).background(Color.white.opacity(0.045),in:RoundedRectangle(cornerRadius:10))
@@ -360,7 +403,7 @@ struct SettingsView:View {
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.3")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.4")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
@@ -391,8 +434,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         settings.level=NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue+1);settings.title="奇点 · 黑洞控制室";settings.contentView=NSHostingView(rootView:SettingsView(state:model));settings.isReleasedWhenClosed=false;settings.center();settings.appearance=NSAppearance(named:.darkAqua)
         status=NSStatusBar.system.statusItem(withLength:NSStatusItem.squareLength);status.button?.image=NSImage(systemSymbolName:"circle.circle",accessibilityDescription:"奇点");status.menu=makeMenu()
         if !CommandLine.arguments.contains("--pet-only") { showSettings() }
-        codexBridge=CodexStateBridge(model:model)
-        codexBridge?.start()
+        if !CommandLine.arguments.contains("--self-test") {
+            codexBridge=CodexStateBridge(model:model)
+            codexBridge?.restartIfNeeded()
+        }
         if CGPreflightScreenCaptureAccess(){
             enableCapture()
         } else {
@@ -406,13 +451,23 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){settings?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.3",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.4",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){savePosition()}
     @objc func quit(){savePosition();NSApp.terminate(nil)}
-    @objc func togglePet(){model.visible.toggle();if model.visible{pet.orderFrontRegardless();if capture.stream != nil {enableCapture()}}else{pet.orderOut(nil);if let stream=capture.stream {Task{try? await stream.stopCapture()}}}}
+    @objc func togglePet(){
+        model.visible.toggle()
+        if model.visible {
+            pet.orderFrontRegardless()
+            if CGPreflightScreenCaptureAccess(){enableCapture()}
+        } else {
+            pet.orderOut(nil)
+            model.capturing=false;model.captureState="桌面透镜已暂停"
+            Task{@MainActor in await capture.start(screen:nil)}
+        }
+    }
     @objc func centerPet(){guard pet != nil,let s=NSScreen.main else{return};pet.setFrameOrigin(NSPoint(x:s.visibleFrame.midX-pet.frame.width/2,y:s.visibleFrame.midY-pet.frame.height/2));savePosition()}
     func resizePet(){guard pet != nil else{return};let center=NSPoint(x:pet.frame.midX,y:pet.frame.midY);pet.setFrame(NSRect(x:center.x-model.size/2,y:center.y-model.size/2,width:model.size,height:model.size),display:true);savePosition()}
-    func savePosition(){guard pet != nil else{return};UserDefaults.standard.set(pet.frame.minX,forKey:"x");UserDefaults.standard.set(pet.frame.minY,forKey:"y")}
+    func savePosition(){guard pet != nil,!CommandLine.arguments.contains("--self-test") else{return};UserDefaults.standard.set(pet.frame.minX,forKey:"x");UserDefaults.standard.set(pet.frame.minY,forKey:"y")}
     var petScreens:[PetScreen] {NSScreen.screens.map{PetScreen(frame:$0.frame,visibleFrame:$0.visibleFrame)}}
     func screenParametersChanged(){
         guard pet != nil else{return}
@@ -422,15 +477,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         }
         checkScreen()
     }
-    func enableCapture(){guard let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen)}}
+    func enableCapture(){guard model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen)}}
     func restartCodexBridge(){codexBridge?.restartIfNeeded()}
     func checkScreen(){guard model.capturing,let s=pet.screen else{return};let id=(s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0;if id != capture.displayID || s.frame != capture.screenRect {enableCapture()}}
-    func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){
-        let old=model.size;model.size=360;assert(abs(self.pet.frame.width-360)<1);model.size=old
-        let origin=self.pet.frame.origin;self.pet.setFrameOrigin(NSPoint(x:origin.x+30,y:origin.y+20));assert(abs(self.pet.frame.minX-origin.x-30)<1);self.pet.setFrameOrigin(origin)
-        self.pet.orderOut(nil);assert(!self.pet.isVisible);self.pet.orderFrontRegardless();assert(self.pet.isVisible)
-        assert(self.view.program != 0);log("SELF_TEST_PASS resize position visibility renderer")
-    }}
+    func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){NativeSelfTest.run(self)}}
 }
 let app=NSApplication.shared
 let delegate=AppDelegate();appDelegate=delegate
