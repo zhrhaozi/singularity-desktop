@@ -15,3 +15,5 @@ jobs:
         run: ./build.sh
       - name: Verify signature
         run: codesign --verify --deep --strict dist/奇点.app
+      - name: Test capture recovery policy without screen access
+        run: dist/奇点.app/Contents/MacOS/Singularity --capture-policy-test

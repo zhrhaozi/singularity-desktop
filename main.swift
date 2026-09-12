@@ -48,6 +48,22 @@ let model=Model()
 var appDelegate: AppDelegate?
 func log(_ message:String) { NSLog("[Singularity] %@",message) }
 
+struct CaptureRetryBudget {
+    private(set) var attempts=0
+    private var healthySince:TimeInterval?
+    mutating func connected(at now:TimeInterval) {healthySince=now}
+    mutating func reset() {attempts=0;healthySince=nil}
+    mutating func nextDelay(at now:TimeInterval)->TimeInterval? {
+        // A briefly successful frame must not turn repeated failures into an endless loop.
+        if let since=healthySince,now-since >= 30 {attempts=0}
+        healthySince=nil
+        let delays:[TimeInterval]=[1,2,4,8,16]
+        guard attempts < delays.count else{return nil}
+        defer{attempts+=1}
+        return delays[attempts]
+    }
+}
+
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     var stream: SCStream?
     let lock=NSLock()
@@ -56,52 +72,126 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     var displayID: CGDirectDisplayID=0
     var busy=false
     private var requestedScreen:NSScreen?
+    private var requestedDisplayID:NSNumber?
+    private var requestedRect=CGRect.zero
     private var requestSerial:UInt64=0
     private var frameStream:SCStream?
+    private var startedStream:SCStream?
+    private var requestPermission=false
+    enum Suspension:Hashable {case sleep,display,session}
+    private var suspensions=Set<Suspension>()
+    private var suspended:Bool {!suspensions.isEmpty}
+    private var retryTask:Task<Void,Never>?
+    private var firstFrameTask:Task<Void,Never>?
+    private var retryBudget=CaptureRetryBudget()
+    var wantsCapture:Bool {requestedScreen != nil}
+    var retryPending:Bool {retryTask != nil}
+
+    private func record(_ message:String) {
+        log(message)
+        guard !CommandLine.arguments.contains("--self-test") else{return}
+        // Persist only lifecycle metadata, never frames or window/application titles.
+        let directory=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Singularity")
+        let file=directory.appendingPathComponent("capture.log")
+        do {
+            try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
+            var data=(try? Data(contentsOf:file)) ?? Data()
+            if data.count > 65_536 {data=Data()}
+            data.append(Data("\(ISO8601DateFormatter().string(from:Date())) \(message)\n".utf8))
+            try data.write(to:file,options:.atomic)
+        } catch {log("CAPTURE_LOG_UNAVAILABLE")}
+    }
+    static func isRecoverable(_ error:Error)->Bool {
+        let e=error as NSError
+        if e.domain == "Singularity.Capture" {return (1...3).contains(e.code)}
+        guard e.domain == SCStreamErrorDomain else{return false}
+        switch SCStreamError.Code(rawValue:e.code) {
+        case .failedToStart, .failedApplicationConnectionInvalid,
+             .failedApplicationConnectionInterrupted, .failedNoMatchingApplicationContext,
+             .internalError, .noWindowList, .noDisplayList, .noCaptureSource:
+            return true
+        default:
+            // User refusal/stop, system stop and unknown errors require an explicit reconnect.
+            return false
+        }
+    }
+    private func captureError(_ code:Int,_ description:String)->NSError {
+        NSError(domain:"Singularity.Capture",code:code,userInfo:[NSLocalizedDescriptionKey:description])
+    }
     private func acceptFrames(from source:SCStream?) {
         lock.lock();defer{lock.unlock()}
         frame=nil;frameStream=source
     }
-    @MainActor func start(screen:NSScreen?) async {
+    @MainActor private func cancelPending() {
+        retryTask?.cancel();retryTask=nil
+        firstFrameTask?.cancel();firstFrameTask=nil
+    }
+    @MainActor func start(screen:NSScreen?,requestPermission:Bool=true) async {
+        cancelPending();retryBudget.reset()
+        self.requestPermission=requestPermission
         requestedScreen=screen;requestSerial &+= 1
+        requestedDisplayID=screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        requestedRect=screen?.frame ?? .zero
+        await reconcile()
+    }
+    @MainActor func suspend(_ reason:Suspension = .sleep) async {
+        let wasSuspended=suspended
+        suspensions.insert(reason)
+        guard wantsCapture,!wasSuspended else{return}
+        cancelPending();requestSerial &+= 1
+        await reconcile()
+    }
+    @MainActor func resume(_ reason:Suspension = .sleep,screen:NSScreen?) async {
+        guard suspensions.remove(reason) != nil,!suspended else{return}
+        guard wantsCapture,let screen else{return}
+        await start(screen:screen,requestPermission:false)
+    }
+    @MainActor func retarget(screen:NSScreen) async {
+        guard wantsCapture else{return}
+        let key=NSDeviceDescriptionKey("NSScreenNumber")
+        guard requestedDisplayID != screen.deviceDescription[key] as? NSNumber ||
+                requestedRect != screen.frame else{return}
+        await start(screen:screen,requestPermission:false)
+    }
+    @MainActor private func reconcile() async {
         guard !busy else {return}
         busy=true;defer{busy=false}
         // Coalesce rapid hide/show/reconnect requests, but never drop the last one.
         while true {
             let serial=requestSerial
-            await transition(to:requestedScreen,serial:serial)
+            await transition(to:suspended ? nil:requestedScreen,serial:serial)
             if serial == requestSerial {break}
         }
     }
     @MainActor private func transition(to screen:NSScreen?,serial:UInt64) async {
-        let old=stream;stream=nil;acceptFrames(from:nil)
+        let old=stream;stream=nil;startedStream=nil;acceptFrames(from:nil)
         model.capturing=false
         if let old {try? await old.stopCapture()}
         guard serial == requestSerial else {return}
         guard let screen else {
-            model.captureState="桌面透镜已暂停";model.error=""
-            log("CAPTURE_PAUSED")
+            model.captureState=suspended ? "等待桌面恢复":"桌面透镜已暂停";model.error=""
+            record("CAPTURE_PAUSED")
             return
         }
         model.captureState="正在连接桌面…"
         do {
             if !CGPreflightScreenCaptureAccess() {
-                log("PERMISSION_REQUEST bundle=\(Bundle.main.bundleIdentifier ?? "unknown") path=\(Bundle.main.bundlePath)")
-                guard CGRequestScreenCaptureAccess() else {
-                    model.capturing=false
-                    model.captureState="等待系统授权"
-                    model.error="请在 macOS 弹窗中打开系统设置，并允许「奇点」。若列表里没有它，点击列表左下角 ＋，选择当前应用；授权后退出并重新打开奇点。"
-                    return
+                if requestPermission {
+                    log("PERMISSION_REQUEST bundle=\(Bundle.main.bundleIdentifier ?? "unknown") path=\(Bundle.main.bundlePath)")
+                }
+                guard requestPermission && CGRequestScreenCaptureAccess() else {
+                    throw NSError(domain:SCStreamErrorDomain,code:SCStreamError.Code.userDeclined.rawValue)
                 }
             }
+            requestPermission=false
             let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
             guard serial == requestSerial else {return}
             let id=(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-            guard let display=content.displays.first(where:{$0.displayID==id}) else {throw NSError(domain:"Display unavailable",code:1)}
+            guard let display=content.displays.first(where:{$0.displayID==id}) else {throw captureError(1,"显示器暂不可用")}
             // Application exclusion survives hidden/new windows and prevents feedback
             // before WindowServer's on-screen window list has caught up.
             let own=content.applications.filter{$0.processID == ProcessInfo.processInfo.processIdentifier}
-            guard !own.isEmpty else {throw NSError(domain:"Application unavailable for capture exclusion",code:2)}
+            guard !own.isEmpty else {throw captureError(2,"应用窗口尚未就绪")}
             let filter=SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
             let config=SCStreamConfiguration()
             config.width=display.width;config.height=display.height
@@ -113,28 +203,77 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             screenRect=screen.frame;displayID=id;stream=next
             acceptFrames(from:next)
             try await next.startCapture()
-            guard serial == requestSerial else {return}
-            model.captureState="桌面透镜已连接";model.capturing=true;model.error=""
-            log("CAPTURE_STARTED display=\(id) excludedApps=\(own.count)")
+            guard serial == requestSerial,stream === next else {return}
+            startedStream=next
+            model.captureState="等待桌面画面…"
+            if latest() != nil {receivedFirstFrame(from:next)}
+            else {
+                firstFrameTask=Task{@MainActor [weak self] in
+                    do {try await Task.sleep(nanoseconds:8_000_000_000)} catch {return}
+                    guard let self,self.stream === next,serial == self.requestSerial else{return}
+                    self.failed(self.captureError(3,"连接后未收到桌面画面"),serial:serial)
+                }
+            }
+            record("CAPTURE_STARTED display=\(id) excludedApps=\(own.count)")
         } catch {
             guard serial == requestSerial else {return}
-            if let failed=stream {stream=nil;acceptFrames(from:nil);try? await failed.stopCapture()}
-            guard serial == requestSerial else {return}
-            model.capturing=false;model.captureState="桌面连接失败"
-            model.error="请检查录屏权限和显示器连接，然后点击重连。\n\(error.localizedDescription)"
-            log("CAPTURE_ERROR \(error)")
+            // The delegate may already have handled a failure during startCapture().
+            guard retryTask == nil,wantsCapture else{return}
+            failed(error,serial:serial)
+        }
+    }
+    @MainActor private func receivedFirstFrame(from source:SCStream) {
+        guard stream === source,startedStream === source,!model.capturing else{return}
+        firstFrameTask?.cancel();firstFrameTask=nil
+        model.capturing=true;model.captureState="桌面透镜已连接";model.error=""
+        retryBudget.connected(at:ProcessInfo.processInfo.systemUptime)
+        record("CAPTURE_FIRST_FRAME display=\(displayID)")
+    }
+    @MainActor private func failed(_ error:Error,serial:UInt64) {
+        guard serial == requestSerial else{return}
+        let retired=stream
+        stream=nil;startedStream=nil;acceptFrames(from:nil);cancelPending()
+        model.capturing=false;requestPermission=false
+        let e=error as NSError
+        record("CAPTURE_FAILURE domain=\(e.domain) code=\(e.code) display=\(displayID)")
+        let stopped=Task {if let retired {try? await retired.stopCapture()}}
+        guard wantsCapture,!suspended else{return}
+        guard Self.isRecoverable(error),CGPreflightScreenCaptureAccess() else {
+            requestedScreen=nil
+            model.captureState="桌面采集已停止"
+            model.error="请检查屏幕录制权限，然后点击「开启桌面透镜」。(\(e.domain) \(e.code))"
+            return
+        }
+        guard let delay=retryBudget.nextDelay(at:ProcessInfo.processInfo.systemUptime) else {
+            requestedScreen=nil
+            model.captureState="桌面重连未成功"
+            model.error="已尝试 5 次，请检查显示器与录屏权限后手动重连。(\(e.domain) \(e.code))"
+            record("CAPTURE_RETRY_EXHAUSTED")
+            return
+        }
+        model.captureState="桌面连接中断，\(Int(delay)) 秒后重连（\(retryBudget.attempts)/5）"
+        model.error=""
+        record("CAPTURE_RETRY attempt=\(retryBudget.attempts) delay=\(delay)")
+        retryTask=Task{@MainActor [weak self] in
+            do {try await Task.sleep(nanoseconds:UInt64(delay*1_000_000_000))} catch {return}
+            await stopped.value
+            guard !Task.isCancelled,let self,serial == self.requestSerial,self.wantsCapture,!self.suspended else{return}
+            self.retryTask=nil;self.requestSerial &+= 1
+            await self.reconcile()
         }
     }
     func stream(_ stream:SCStream,didOutputSampleBuffer buffer:CMSampleBuffer,of type:SCStreamOutputType) {
         guard type == .screen,buffer.isValid, let image=CMSampleBufferGetImageBuffer(buffer) else{return}
         guard let attachments=CMSampleBufferGetSampleAttachmentsArray(buffer,createIfNecessary:false) as? [[SCStreamFrameInfo:Any]],let raw=attachments.first?[.status] as? Int,raw==SCFrameStatus.complete.rawValue else{return}
-        lock.lock();defer{lock.unlock()}
+        lock.lock()
+        let first=stream === frameStream && frame == nil
         if stream === frameStream {frame=image}
+        lock.unlock()
+        if first {Task{@MainActor in self.receivedFirstFrame(from:stream)}}
     }
     func stream(_ stream:SCStream,didStopWithError error:Error) { DispatchQueue.main.async {
         guard stream === self.stream else {return}
-        self.stream=nil;self.acceptFrames(from:nil)
-        model.capturing=false;model.captureState="桌面连接已中断，请重连";log("STREAM_STOP \(error)")
+        self.failed(error,serial:self.requestSerial)
     } }
     func latest()->CVPixelBuffer? {lock.lock();defer{lock.unlock()};return frame}
 }
@@ -403,7 +542,7 @@ struct SettingsView:View {
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.4")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.5")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
@@ -439,26 +578,50 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
             codexBridge?.restartIfNeeded()
         }
         if CGPreflightScreenCaptureAccess(){
-            enableCapture()
+            enableCapture(requestPermission:false)
         } else {
             model.captureState="需要屏幕录制权限"
             model.error="真实桌面扭曲需要屏幕录制权限。请点击「开启桌面透镜」，或在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许「奇点」。"
         }
         NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main){[weak self] _ in self?.screenParametersChanged()}
+        let workspace=NSWorkspace.shared.notificationCenter
+        let pauses:[(Notification.Name,Capture.Suspension)]=[
+            (NSWorkspace.willSleepNotification,.sleep),
+            (NSWorkspace.screensDidSleepNotification,.display),
+            (NSWorkspace.sessionDidResignActiveNotification,.session)
+        ]
+        for (event,reason) in pauses {
+            workspace.addObserver(forName:event,object:nil,queue:.main){[weak self] _ in
+                Task{@MainActor in await self?.capture.suspend(reason)}
+            }
+        }
+        let resumes:[(Notification.Name,Capture.Suspension)]=[
+            (NSWorkspace.didWakeNotification,.sleep),
+            (NSWorkspace.screensDidWakeNotification,.display),
+            (NSWorkspace.sessionDidBecomeActiveNotification,.session)
+        ]
+        for (event,reason) in resumes {
+            workspace.addObserver(forName:event,object:nil,queue:.main){[weak self] _ in
+                Task{@MainActor in
+                    guard let self else{return}
+                    await self.capture.resume(reason,screen:self.pet.screen ?? NSScreen.main)
+                }
+            }
+        }
         log("APP_READY")
         if CommandLine.arguments.contains("--self-test") {runSelfTest()}
     }
     func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){settings?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.4",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.5",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){savePosition()}
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){
         model.visible.toggle()
         if model.visible {
             pet.orderFrontRegardless()
-            if CGPreflightScreenCaptureAccess(){enableCapture()}
+            if CGPreflightScreenCaptureAccess(){enableCapture(requestPermission:false)}
         } else {
             pet.orderOut(nil)
             model.capturing=false;model.captureState="桌面透镜已暂停"
@@ -477,10 +640,14 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         }
         checkScreen()
     }
-    func enableCapture(){guard model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen)}}
+    func enableCapture(requestPermission:Bool=true){guard model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen,requestPermission:requestPermission)}}
     func restartCodexBridge(){codexBridge?.restartIfNeeded()}
-    func checkScreen(){guard model.capturing,let s=pet.screen else{return};let id=(s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0;if id != capture.displayID || s.frame != capture.screenRect {enableCapture()}}
+    func checkScreen(){guard capture.wantsCapture,let s=pet.screen else{return};Task{@MainActor in await capture.retarget(screen:s)}}
     func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){NativeSelfTest.run(self)}}
+}
+if CommandLine.arguments.contains("--capture-policy-test") {
+    NativeSelfTest.recoveryPolicyChecks()
+    exit(0)
 }
 let app=NSApplication.shared
 let delegate=AppDelegate();appDelegate=delegate
