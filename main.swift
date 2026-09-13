@@ -316,6 +316,7 @@ final class PetView:NSOpenGLView {
         var useCustomColor:GLint = -1
         var style:GLint = -1
         var hasCapture:GLint = -1
+        var useGeometryCache:GLint = -1
     }
     var program:GLuint=0, vao:GLuint=0, textureID:GLuint=0
     var timer:Timer?
@@ -336,6 +337,10 @@ final class PetView:NSOpenGLView {
     private(set) var importedFrames=0
     private(set) var copiedFrames=0
     private(set) var drawnFrames=0
+    private(set) var geometryCache:LensGeometryCache?
+    private(set) var renderingActive=true
+    private let geometryCachingEnabled=ProcessInfo.processInfo.environment["SINGULARITY_DISABLE_GEOMETRY_CACHE"] != "1"
+    var benchmarkDirectGeometry=false
     private var renderedWindowFrame=CGRect.zero
     private var renderedCapture=false
     private var uniforms=UniformLocations()
@@ -365,10 +370,22 @@ final class PetView:NSOpenGLView {
             if ok==0 {var info=[GLchar](repeating:0,count:16384);glGetShaderInfoLog(shader,16384,nil,&info);log("SHADER_ERROR \(String(cString:info))");model.error="图形渲染初始化失败"}
             return shader
         }
-        let vertex=compile(GLenum(GL_VERTEX_SHADER),"#version 150\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.0-1.0,0,1);}")
-        let fragment=compile(GLenum(GL_FRAGMENT_SHADER),try! String(contentsOf:Bundle.main.url(forResource:"blackhole",withExtension:"frag")!,encoding:.utf8))
+        let vertex=compile(GLenum(GL_VERTEX_SHADER),try! String(contentsOf:Bundle.main.url(forResource:"blackhole",withExtension:"vert")!,encoding:.utf8))
+        let source=try! String(contentsOf:Bundle.main.url(forResource:"blackhole",withExtension:"frag")!,encoding:.utf8)
+        let fragment=compile(GLenum(GL_FRAGMENT_SHADER),source)
         program=glCreateProgram();glAttachShader(program,vertex);glAttachShader(program,fragment);glLinkProgram(program)
         var ok:GLint=0;glGetProgramiv(program,GLenum(GL_LINK_STATUS),&ok);log("GL_LINK \(ok)")
+        let geometryFragment=compile(GLenum(GL_FRAGMENT_SHADER),source.replacingOccurrences(of:"#version 150",with:"#version 150\n#define GEOMETRY_PASS"))
+        let geometryProgram=glCreateProgram()
+        glAttachShader(geometryProgram,vertex);glAttachShader(geometryProgram,geometryFragment)
+        for (i,name) in ["geometryBackground","geometryCrossing0","geometryCrossing1"].enumerated() {
+            glBindFragDataLocation(geometryProgram,GLuint(i),name)
+        }
+        glLinkProgram(geometryProgram)
+        var geometryOK:GLint=0;glGetProgramiv(geometryProgram,GLenum(GL_LINK_STATUS),&geometryOK)
+        if geometryOK==1 {geometryCache=LensGeometryCache(program:geometryProgram)}
+        else {glDeleteProgram(geometryProgram);log("GEOMETRY_CACHE_LINK_FAILED")}
+        glDeleteShader(geometryFragment)
         glDeleteShader(vertex);glDeleteShader(fragment);glGenVertexArrays(1,&vao);glBindVertexArray(vao)
         cacheUniformLocations()
         if let context=openGLContext?.cglContextObj,let format=pixelFormat?.cglPixelFormatObj {
@@ -387,7 +404,23 @@ final class PetView:NSOpenGLView {
         glTexParameteri(GLenum(GL_TEXTURE_RECTANGLE),GLenum(GL_TEXTURE_WRAP_T),GL_CLAMP_TO_EDGE)
         pixels.withUnsafeBytes{glTexImage2D(GLenum(GL_TEXTURE_RECTANGLE),0,GL_RGBA8,1,1,0,GLenum(GL_BGRA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
         glActiveTexture(GLenum(GL_TEXTURE0))
-        timer=Timer(timeInterval:1.0/30,repeats:true){[weak self] _ in self?.tick()};RunLoop.main.add(timer!,forMode:.common)
+        setRenderingActive(renderingActive)
+    }
+    func setRenderingActive(_ active:Bool) {
+        renderingActive=active
+        timer?.invalidate();timer=nil
+        if active {
+            guard program != 0 else{return}
+            lastTick=ProcessInfo.processInfo.systemUptime
+            let next=Timer(timeInterval:1.0/30,repeats:true){[weak self] _ in self?.tick()}
+            next.tolerance=0.003;timer=next;RunLoop.main.add(next,forMode:.common)
+            needsDisplay=true
+        } else {
+            openGLContext?.makeCurrentContext()
+            uploaded=nil;desktopSurface=nil;usingDesktopSurface=false
+            if let cache=desktopCache {CVOpenGLTextureCacheFlush(cache,0)}
+            geometryCache?.release()
+        }
     }
     private func cacheUniformLocations() {
         uniforms.desktop=glGetUniformLocation(program,"desktop")
@@ -418,6 +451,11 @@ final class PetView:NSOpenGLView {
         uniforms.useCustomColor=glGetUniformLocation(program,"useCustomColor")
         uniforms.style=glGetUniformLocation(program,"style")
         uniforms.hasCapture=glGetUniformLocation(program,"hasCapture")
+        uniforms.useGeometryCache=glGetUniformLocation(program,"useGeometryCache")
+        glUseProgram(program)
+        for (i,name) in ["geometryMap","crossingMap0","crossingMap1"].enumerated() {
+            set1i(glGetUniformLocation(program,name),GLint(i+2))
+        }
     }
     @inline(__always) private func set1f(_ location:GLint,_ value:Float) { if location >= 0 { glUniform1f(location,value) } }
     @inline(__always) private func set1i(_ location:GLint,_ value:GLint) { if location >= 0 { glUniform1i(location,value) } }
@@ -446,18 +484,23 @@ final class PetView:NSOpenGLView {
         let dt=min(0.1,max(0,now-lastTick));lastTick=now
         guard let w=window,w.isVisible else{return}
         advanceAnimation(dt:dt)
-        let pointer=w.convertPoint(fromScreen:NSEvent.mouseLocation)
+        let mouse=NSEvent.mouseLocation
+        let pointer=w.convertPoint(fromScreen:mouse)
         let hovering=hypot(pointer.x-bounds.midX,pointer.y-bounds.midY)<bounds.width*0.29
         if model.wander && !dragging && !hovering && !(appDelegate?.settings?.isVisible ?? false),let screen=w.screen {
             w.setFrameOrigin(wanderState.advance(origin:w.frame.origin,size:w.frame.size,screen:screen.visibleFrame,speed:model.travelSpeed,dt:dt))
             if now-lastSave>5 {appDelegate?.savePosition();lastSave=now}
         }
-        if !dragging && !CommandLine.arguments.contains("--self-test") {let point=convert(w.convertPoint(fromScreen:NSEvent.mouseLocation),from:nil);let d=hypot(point.x-bounds.midX,point.y-bounds.midY);w.ignoresMouseEvents = d > bounds.width*0.27}
+        if !dragging && !CommandLine.arguments.contains("--self-test") {
+            let point=convert(pointer,from:nil)
+            let ignores=hypot(point.x-bounds.midX,point.y-bounds.midY)>bounds.width*0.27
+            if w.ignoresMouseEvents != ignores {w.ignoresMouseEvents=ignores}
+        }
         if !model.paused || needsDisplay || capture.latest() !== uploaded ||
             w.frame != renderedWindowFrame || model.capturing != renderedCapture {needsDisplay=true}
     }
     override func draw(_ dirtyRect:NSRect) {
-        guard program != 0 else{return};openGLContext?.makeCurrentContext()
+        guard program != 0,renderingActive else{return};openGLContext?.makeCurrentContext()
         drawnFrames+=1
         let backing=convertToBacking(bounds)
         let width=GLsizei(max(1,Int(backing.width.rounded(.up)))),height=GLsizei(max(1,Int(backing.height.rounded(.up))))
@@ -499,9 +542,21 @@ final class PetView:NSOpenGLView {
         glPixelStorei(GLenum(GL_UNPACK_ROW_LENGTH),0)
         uploaded=buffer;copiedFrames+=1
     }
-    func renderFrame(width:GLsizei,height:GLsizei,useCapture:Bool,captureBuffer:CVPixelBuffer?=nil,forceCPUUpload:Bool=false) {
+    func renderFrame(width:GLsizei,height:GLsizei,useCapture:Bool,captureBuffer:CVPixelBuffer?=nil,forceCPUUpload:Bool=false,forceUncachedGeometry:Bool=false) {
+        glBindVertexArray(vao)
+        let values:[(String,Float)]=[
+            ("LENS_DEPTH",Float(model.lens)),("inclination",Float(model.tilt)),
+            ("rollAngle",Float(model.roll)),("spin",Float(model.hasSpin ? model.spin:0)),
+            ("charge",Float(model.effectiveCharge)),("massScale",Float(model.mass))]
+        let cached = geometryCachingEnabled && !forceUncachedGeometry && !benchmarkDirectGeometry && (geometryCache?.prepare(width:width,height:height,signature:values.map(\.1)+[Float(model.style)]) {p in
+            for (name,value) in values {self.set1f(glGetUniformLocation(p,name),value)}
+            self.set2f(glGetUniformLocation(p,"iResolution"),Float(width),Float(height))
+            self.set1i(glGetUniformLocation(p,"style"),GLint(model.style))
+        } ?? false)
+        geometryCache?.bind()
         glViewport(0,0,width,height);glClearColor(0,0,0,0);glClear(GLbitfield(GL_COLOR_BUFFER_BIT))
         glUseProgram(program);glBindVertexArray(vao);glActiveTexture(GLenum(GL_TEXTURE0));glBindTexture(GLenum(GL_TEXTURE_2D),textureID)
+        set1i(uniforms.useGeometryCache,cached ? 1:0)
         if useCapture,let buffer=captureBuffer ?? capture.latest() {bindDesktop(buffer,forceCPUUpload:forceCPUUpload)}
         else if useCapture {
             uploaded=nil;desktopSurface=nil;usingDesktopSurface=false
@@ -597,7 +652,7 @@ struct SettingsView:View {
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.7")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.8")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
@@ -609,6 +664,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     var status:NSStatusItem!
     let capture=Capture()
     var codexBridge:CodexStateBridge?
+    private var idleReasons=Set<Capture.Suspension>()
     func applicationDidFinishLaunching(_ notification:Notification) {
         let menu=NSMenu();let top=NSMenuItem();menu.addItem(top);let submenu=NSMenu();top.submenu=submenu
         submenu.addItem(withTitle:"关于奇点",action:#selector(about),keyEquivalent:"");submenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");submenu.addItem(.separator());submenu.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");NSApp.mainMenu=menu
@@ -649,7 +705,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         ]
         for (event,reason) in pauses {
             workspace.addObserver(forName:event,object:nil,queue:.main){[weak self] _ in
-                Task{@MainActor in await self?.capture.suspend(reason)}
+                Task{@MainActor in await self?.suspendActivity(reason)}
             }
         }
         let resumes:[(Notification.Name,Capture.Suspension)]=[
@@ -660,8 +716,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         for (event,reason) in resumes {
             workspace.addObserver(forName:event,object:nil,queue:.main){[weak self] _ in
                 Task{@MainActor in
-                    guard let self else{return}
-                    await self.capture.resume(reason,screen:self.pet.screen ?? NSScreen.main)
+                    await self?.resumeActivity(reason)
                 }
             }
         }
@@ -671,16 +726,18 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){settings?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.7",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.8",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){savePosition()}
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){
         model.visible.toggle()
         if model.visible {
             pet.orderFrontRegardless()
+            view.setRenderingActive(idleReasons.isEmpty)
             if CGPreflightScreenCaptureAccess(){enableCapture(requestPermission:false)}
         } else {
             pet.orderOut(nil)
+            view.setRenderingActive(false)
             model.capturing=false;model.captureState="桌面透镜已暂停"
             Task{@MainActor in await capture.start(screen:nil)}
         }
@@ -698,7 +755,24 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         checkScreen()
     }
     func enableCapture(requestPermission:Bool=true){guard model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen,requestPermission:requestPermission)}}
-    func restartCodexBridge(){codexBridge?.restartIfNeeded()}
+    func restartCodexBridge(){
+        if idleReasons.isEmpty {codexBridge?.restartIfNeeded()}
+        else {codexBridge?.stop()}
+    }
+    @MainActor func suspendActivity(_ reason:Capture.Suspension) async {
+        idleReasons.insert(reason)
+        view.setRenderingActive(false)
+        codexBridge?.stop()
+        await capture.suspend(reason)
+    }
+    @MainActor func resumeActivity(_ reason:Capture.Suspension) async {
+        guard idleReasons.remove(reason) != nil else{return}
+        if idleReasons.isEmpty {
+            view.setRenderingActive(model.visible)
+            restartCodexBridge()
+        }
+        await capture.resume(reason,screen:pet.screen ?? NSScreen.main)
+    }
     func checkScreen(){guard capture.wantsCapture,let s=pet.screen else{return};Task{@MainActor in await capture.retarget(screen:s)}}
     func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){NativeSelfTest.run(self)}}
 }

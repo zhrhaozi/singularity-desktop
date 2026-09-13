@@ -30,5 +30,6 @@ for forbidden in \
 done
 if command -v glslangValidator >/dev/null 2>&1; then
   glslangValidator -S frag "$SHADER"
+  glslangValidator -S vert "$PWD/Resources/blackhole.vert"
 fi
 echo "PASS: GLSL shader contract and defined smoothstep paths"

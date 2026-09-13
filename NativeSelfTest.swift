@@ -11,6 +11,10 @@ enum NativeSelfTest {
     }
 
     @MainActor static func run(_ app:AppDelegate) {
+        if CommandLine.arguments.contains("--self-test-performance") {
+            performanceRun(app)
+            return
+        }
         if CommandLine.arguments.contains("--self-test-fail") {
             require(false,"intentional failure validates the release test runner")
         }
@@ -70,14 +74,28 @@ enum NativeSelfTest {
                 app.togglePet()
                 require(!app.pet.isVisible,"hide entry point")
                 await waitForCapture(app,active:false)
+                require(app.view.timer==nil && app.view.uploaded==nil,"hidden view releases timer and desktop")
                 app.togglePet()
                 require(app.pet.isVisible,"show entry point")
+                require(app.view.timer != nil,"shown view resumes timer")
                 await waitForCapture(app,active:true)
                 app.togglePet();app.togglePet();app.togglePet()
                 await waitForCapture(app,active:false)
                 app.togglePet()
                 await waitForCapture(app,active:true)
                 await recoveryChecks(app,screen:screen)
+                await app.suspendActivity(.display)
+                await app.suspendActivity(.session)
+                let dormant=app.view.drawnFrames
+                try? await Task.sleep(nanoseconds:400_000_000)
+                require(app.view.timer==nil && app.view.drawnFrames==dormant,"suspended display has no redraws or timer")
+                await app.resumeActivity(.display)
+                require(app.view.timer==nil && !model.capturing,"overlapping suspension stays dormant")
+                await app.resumeActivity(.session)
+                await waitForCapture(app,active:true)
+                require(app.view.timer != nil,"final resume restarts rendering")
+                capturedRenderCheck(app.view)
+                log("IDLE_RESOURCE_TEST_PASS hidden suspended overlap resume fresh-desktop")
                 await app.capture.start(screen:nil)
                 model.paused=true
                 try? await Task.sleep(nanoseconds:300_000_000)
@@ -96,6 +114,32 @@ enum NativeSelfTest {
             }
             log("SELF_TEST_PASS release-checks window renderer animation capture")
             if !CommandLine.arguments.contains("--self-test-stay") {NSApp.terminate(nil)}
+        }
+    }
+
+    @MainActor static func performanceRun(_ app:AppDelegate) {
+        model.codexAuto=false;model.wander=false;model.paused=false
+        model.setCodexState(.longTask,source:"performance-test")
+        Task{@MainActor in
+            await waitForCapture(app,active:true)
+            try? await Task.sleep(nanoseconds:3_000_000_000)
+            let start=ProcessInfo.processInfo.systemUptime
+            let frames=app.view.drawnFrames,imports=app.view.importedFrames,copies=app.view.copiedFrames
+            let duration=min(300,max(20,Double(ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_SECONDS"] ?? "") ?? 75))
+            log("PERFORMANCE_RUN_BEGIN pid=\(getpid()) size=\(model.size) mass=\(model.mass) cache=\(app.view.geometryCache?.rebuilds ?? 0)")
+            if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ALTERNATE"]=="1" {
+                for phase in 0..<8 {
+                    app.view.benchmarkDirectGeometry=phase%2==0
+                    log("PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) direct=\(app.view.benchmarkDirectGeometry)")
+                    try? await Task.sleep(nanoseconds:20_000_000_000)
+                }
+            } else {
+                try? await Task.sleep(nanoseconds:UInt64(duration*1_000_000_000))
+            }
+            let elapsed=ProcessInfo.processInfo.systemUptime-start
+            require(model.capturing && app.capture.latest() != nil,"performance capture stays connected")
+            log("PERFORMANCE_RUN_END fps=\(Double(app.view.drawnFrames-frames)/elapsed) imports=\(app.view.importedFrames-imports) copies=\(app.view.copiedFrames-copies) cache-rebuilds=\(app.view.geometryCache?.rebuilds ?? 0)")
+            NSApp.terminate(nil)
         }
     }
 
@@ -271,13 +315,13 @@ enum NativeSelfTest {
             glBindFramebuffer(GLenum(GL_FRAMEBUFFER),GLuint(previous))
             glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&color)
         }
-        func pixels(_ size:Int,buffer:CVPixelBuffer?=nil,cpu:Bool=false)->[UInt8] {
+        func pixels(_ size:Int,buffer:CVPixelBuffer?=nil,cpu:Bool=false,uncached:Bool=false)->[UInt8] {
             glBindTexture(GLenum(GL_TEXTURE_2D),color)
             glTexImage2D(GLenum(GL_TEXTURE_2D),0,GL_RGBA8,GLsizei(size),GLsizei(size),0,GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),nil)
             glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER),GLenum(GL_COLOR_ATTACHMENT0),GLenum(GL_TEXTURE_2D),color,0)
             glDrawBuffer(GLenum(GL_COLOR_ATTACHMENT0));glReadBuffer(GLenum(GL_COLOR_ATTACHMENT0))
             require(glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))==GL_FRAMEBUFFER_COMPLETE,"framebuffer")
-            view.renderFrame(width:GLsizei(size),height:GLsizei(size),useCapture:buffer != nil,captureBuffer:buffer,forceCPUUpload:cpu)
+            view.renderFrame(width:GLsizei(size),height:GLsizei(size),useCapture:buffer != nil,captureBuffer:buffer,forceCPUUpload:cpu,forceUncachedGeometry:uncached)
             var bytes=[UInt8](repeating:0,count:size*size*4)
             bytes.withUnsafeMutableBytes{glReadPixels(0,0,GLsizei(size),GLsizei(size),GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
             require(glGetError()==GL_NO_ERROR,"GPU render/readback")
@@ -286,7 +330,7 @@ enum NativeSelfTest {
         model.mass=1;model.brightness=2.2;model.tilt=1.2;model.roll=0.18
         model.kind=1;model.spin=0.7;model.customColor=false;model.paused=false
         var cases=0
-        for size in [280,560] {
+        for size in [280,560,1400] {
             for style in 0...3 {
                 model.style=style
                 for state in CodexActivityState.allCases {
@@ -296,6 +340,9 @@ enum NativeSelfTest {
                     view.codexParticlesSmooth=state.particleDensity
                     view.clock=2;view.diskPhase=3;view.dustPhase=1
                     let image=pixels(size)
+                    let reference=pixels(size,uncached:true)
+                    let difference=zip(image,reference).map{abs(Int($0)-Int($1))}.max() ?? 0
+                    require(difference<=2,"geometry cache equivalence \(size)/\(style)/\(state.token): \(difference)")
                     require(image[3]==0,"transparent corner")
                     let center=(size/2*size+size/2)*4
                     require(image[center+3]>240 && image[center]<16 && image[center+1]<16 && image[center+2]<16,"opaque black shadow")
@@ -323,6 +370,8 @@ enum NativeSelfTest {
         model.paused=false;view.advanceAnimation(dt:0.1)
         require(pixels(280) != paused,"resume moves")
         log("RENDER_TEST_PASS \(cases) state/style/scale frames shadow transparency movement pause-resume")
+        require(view.geometryCache?.available==true,"geometry cache active")
+        log("GEOMETRY_EQUIVALENCE_TEST_PASS \(cases) cached/reference frames")
         let wasCapturing=model.capturing,oldRect=view.capture.screenRect
         model.capturing=true
         view.capture.screenRect=view.window?.frame ?? NSRect(x:0,y:0,width:280,height:280)
@@ -349,8 +398,62 @@ enum NativeSelfTest {
             let reference=pixels(280,buffer:buffer,cpu:true)
             let maxDifference=zip(imported,reference).map{abs(Int($0)-Int($1))}.max() ?? 0
             require(maxDifference<=2,"generated texture color/orientation equivalence \(maxDifference)")
+            for family in 0...3 {
+                model.kind=family
+                for mass in [0.65,1.0,1.45] {
+                    model.mass=mass;model.spin = family % 2 == 0 ? 0.85 : -0.58
+                    model.charge=0.6;model.lens=18.6;model.tilt=1.45;model.roll=0.13
+                    let image=pixels(280,buffer:buffer)
+                    let rebuilds=view.geometryCache!.rebuilds
+                    let direct=pixels(280,buffer:buffer,uncached:true)
+                    let difference=zip(image,direct).map{abs(Int($0)-Int($1))}.max() ?? 0
+                    require(difference<=2,"lensed geometry cache family=\(family) mass=\(mass): \(difference)")
+                    view.advanceAnimation(dt:0.03)
+                    _=pixels(280,buffer:buffer)
+                    require(view.geometryCache!.rebuilds==rebuilds,"animation and desktop retain geometry cache")
+                }
+            }
             log("TEXTURE_SYNTHETIC_TEST_PASS shared=\(shared) max-difference=\(maxDifference)")
         }
+        model.mass=0.65;model.kind=3;model.spin = -0.58;model.charge=0.376
+        model.style=1;model.setCodexState(.longTask,source:"self-test")
+        _=pixels(584)
+        var query:GLuint=0
+        glGenQueries(1,&query)
+        var cachedTimes=[Double](),directTimes=[Double]()
+        for run in 0..<6 {
+            let direct=run % 2 == 0
+            glFinish()
+            glBeginQuery(GLenum(GL_TIME_ELAPSED),query)
+            for _ in 0..<60 {
+                view.advanceAnimation(dt:1.0/30)
+                view.renderFrame(width:584,height:584,useCapture:false,forceUncachedGeometry:direct)
+            }
+            glEndQuery(GLenum(GL_TIME_ELAPSED))
+            var nanoseconds:GLuint64=0
+            glGetQueryObjectui64v(query,GLenum(GL_QUERY_RESULT),&nanoseconds)
+            if direct {directTimes.append(Double(nanoseconds)/60/1_000_000)}
+            else {cachedTimes.append(Double(nanoseconds)/60/1_000_000)}
+        }
+        glDeleteQueries(1,&query)
+        require(glGetError()==GL_NO_ERROR,"GPU timer query")
+        log("GEOMETRY_GPU_BENCHMARK cached-ms=\(cachedTimes) direct-ms=\(directTimes)")
+        let rebuilds=view.geometryCache!.rebuilds
+        view.geometryCache?.release()
+        _=pixels(584)
+        require(view.geometryCache!.rebuilds==rebuilds+1,"released geometry is rebuilt")
+        let mutations:[()->Void]=[
+            {model.lens+=0.7},{model.tilt-=0.12},{model.roll+=0.2},
+            {model.spin+=0.2},{model.charge-=0.1},{model.mass+=0.1},{model.style=2}]
+        for mutate in mutations {
+            let count=view.geometryCache!.rebuilds
+            mutate()
+            let cached=pixels(584),direct=pixels(584,uncached:true)
+            require(view.geometryCache!.rebuilds==count+1,"geometry parameter invalidates cache")
+            let delta=zip(cached,direct).map{abs(Int($0)-Int($1))}.max() ?? 0
+            require(delta<=2,"updated geometry matches direct path \(delta)")
+        }
+        log("GEOMETRY_CACHE_TEST_PASS families desktop animation lifetime")
     }
 
     static func savePNG(_ pixels:[UInt8],size:Int,name:String) {

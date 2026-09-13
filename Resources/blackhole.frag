@@ -15,7 +15,17 @@ uniform int codexState;
 uniform float codexEnergy, codexTrail, codexParticles, codexPulse;
 uniform float diskPhase, dustPhase;
 uniform float codexEnergySmooth, codexTrailSmooth, codexParticlesSmooth;
+#ifdef GEOMETRY_PASS
+out vec4 geometryBackground;
+out vec4 geometryCrossing0;
+out vec4 geometryCrossing1;
+int crossingCount = 0;
+#else
+uniform sampler2D geometryMap, crossingMap0, crossingMap1;
+uniform int useGeometryCache;
+flat in vec4 dustCenters[9];
 out vec4 outputColor;
+#endif
 vec4 desktopSample(vec2 uv) {
  if(hasCapture == 0) return vec4(0.0);
  vec2 sourceUV = captureRect.xy + uv * captureRect.zw;
@@ -113,10 +123,18 @@ vec2 projectDiskPoint(vec2 diskPoint, float diskCos, float diskRoll) {
     return rot(vec2(diskPoint.x, diskPoint.y * diskCos), diskRoll);
 }
 
+#ifndef GEOMETRY_PASS
+vec2 particleCenter(int index) {
+    vec4 pair=dustCenters[index/2];
+    return index%2==0 ? pair.xy : pair.zw;
+}
+
 // A restrained particle field that only appears near the projected disk. It
 // is state-driven, but its phase is supplied by the renderer so a reconnect
 // cannot make particles jump backwards or replay old motion.
 vec3 codexDust(vec2 p, float rh, float phase) {
+    // Even the widest infall spark is below an 8-bit contribution here.
+    if (dot(p, p) > 36.0 * rh * rh) return vec3(0.0);
     float energy = clamp(codexEnergySmooth > 0.001 ? codexEnergySmooth : codexEnergy, 0.0, 1.0);
     float particles = clamp(codexParticlesSmooth > 0.001 ? codexParticlesSmooth : codexParticles, 0.0, 1.0);
     float visibility = smoothstep(0.05, 0.95, particles);
@@ -124,21 +142,12 @@ vec3 codexDust(vec2 p, float rh, float phase) {
     float diskCos = clamp(abs(cos(diskInclination)), 0.16, 1.0);
     // Keep the overlay in the same plane as the traced disk. Spin changes
     // direction below; it must not make the particle plane wobble separately.
-    float diskRoll = rollAngle;
     float shadowClear = smoothstep(1.10 * rh, 1.48 * rh, length(p));
     float outc = 0.0;
-    float instability = codexState == 5 ? 1.0 : 0.0;
-    float spinSign = spin < 0.0 ? -1.0 : 1.0;
-    float orbitPhase = phase * spinSign * (0.72 + 0.28 * abs(spin));
 
     for (int i = 0; i < 14; i++) {
         float fi = float(i);
-        float direction = i % 2 == 0 ? 1.0 : -1.0;
-        float particlePhase = fi * 2.399963 + orbitPhase * direction + spin * fi * 0.17;
-        float ring = rh * (2.10 + 1.50 * fract(sin(fi * 17.13) * 43758.5453));
-        ring += sin(phase * 1.7 + fi * 3.2) * rh * 0.11 * instability;
-        vec2 cDisk = vec2(cos(particlePhase), sin(particlePhase)) * ring;
-        vec2 c = projectDiskPoint(cDisk, diskCos, diskRoll);
+        vec2 c = particleCenter(i);
         vec2 delta = p - c;
         float size = rh * (0.025 + 0.025 * fract(sin(fi * 8.1) * 912.4));
         float minorSize = size * mix(0.34, 1.0, diskCos);
@@ -150,14 +159,8 @@ vec3 codexDust(vec2 p, float rh, float phase) {
     // Command mode gets inward-falling fragments. Long-task state (3) keeps
     // that same ingress structure while error mode adds a jittering phase.
     if (codexState == 2 || codexState == 3 || codexState == 5) {
-        float fallPhase = fract(phase * 0.72);
         for (int j = 0; j < 4; j++) {
-            float fj = float(j);
-            float errorJitter = codexState == 5 ? 0.16 * sin(phase * 3.7 + fj * 2.4) : 0.0;
-            float a = fj * 1.57 + spinSign * phase * 0.22 + errorJitter;
-            float rr = rh * mix(4.9, 1.65, fract(fallPhase + fj * 0.21));
-            vec2 cDisk = vec2(cos(a), sin(a)) * rr;
-            vec2 c = projectDiskPoint(cDisk, diskCos, diskRoll);
+            vec2 c = particleCenter(j+14);
             vec2 delta = p - c;
             float minorSize = rh * 0.11 * mix(0.42, 1.0, diskCos);
             float spark = exp(-(delta.x * delta.x / max(rh * rh * 0.012, 1e-4) +
@@ -170,6 +173,28 @@ vec3 codexDust(vec2 p, float rh, float phase) {
                      (codexState == 4 ? vec3(0.62, 1.0, 0.72) :
                      (codexState == 5 ? vec3(1.0, 0.30, 0.16) : vec3(1.0, 0.64, 0.32)));
     return dustColor * outc * visibility * (0.34 + 0.72 * energy) * shadowClear;
+}
+#endif
+
+void shadeCrossing(vec3 crossing, DiskLook L, float rin, float rout, float dil,
+                   inout vec3 emitc, inout float trans) {
+    if (crossing.x <= 0.0 || trans <= 0.02) return;
+    float rc = crossing.x, turns = crossing.y, g = crossing.z;
+    float band = smoothstep(rin, rin * 1.25, rc)
+               * (1.0 - smoothstep(rout * 0.70, rout, rc));
+    float kep = pow(rin / rc, 1.5);
+    float gloc = sqrt(max(1.0 - 1.5 / rc, 0.02));
+    float swirl = rc * L.wind * 0.12 - diskPhase * kep * gloc * dil;
+    float streaks = vnoiseWrapY(vec2(rc * 2.8, turns * 19.0 + swirl * 3.0), 19.0) * 0.65 +
+                    vnoiseWrapY(vec2(rc * 1.0, turns * 9.0 + swirl * 1.5 + 7.0), 9.0) * 0.35;
+    streaks = 0.35 + L.contr * streaks * streaks;
+    float xpr = max(1.0 - sqrt(rin / rc), 0.0);
+    float tprof = pow(rin / rc, 0.75) * pow(xpr, 0.25) / 0.488;
+    vec3 cbb = blackbody(L.temp * tprof * g);
+    float boost = pow(g, L.beam);
+    float density = band * streaks;
+    emitc += trans * cbb * (L.gain * 2.2 * density * tprof * tprof * boost);
+    trans *= 1.0 - clamp(L.opac * density, 0.0, 1.0);
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
@@ -227,6 +252,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float trans = 1.0;
     bool captured = false;
     if (b >= bmax) {
+#ifndef GEOMETRY_PASS
         float u    = Z0 * inversesqrt(Z0 * Z0 + b * b);
         float defl = (2.0 / (W * W)) / max(plen, 1e-4)
                    * (1.29 * u + 0.07) * max(LENS_DEPTH - 2.14 * u + 0.75, 0.0)
@@ -247,8 +273,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // bend so stars don't pop at the boundary circle
         vec3 d = normalize(vec3(-(pr / b) * (2.0 / b), -1.0));
         bg = term + stars(d) * L.star * window * shield;
+#endif
     } else {
 
+#ifndef GEOMETRY_PASS
+    vec4 mapping = useGeometryCache == 1 ? texelFetch(geometryMap, ivec2(gl_FragCoord.xy), 0) : vec4(0.0, 0.0, 0.0, -1.0);
+    if (mapping.w >= 0.0) {
+        captured = mapping.w > 0.5;
+        bg = desktopSample(mapping.xy).rgb * mapping.z;
+        shadeCrossing(texelFetch(crossingMap0, ivec2(gl_FragCoord.xy), 0).xyz, L, rin, rout, dil, emitc, trans);
+        shadeCrossing(texelFetch(crossingMap1, ivec2(gl_FragCoord.xy), 0).xyz, L, rin, rout, dil, emitc, trans);
+    } else {
+#endif
     // ====================== near field: trace the geodesic ==================
     // Parallel rays from a distant camera at +z. The hole is at the origin,
     // r_s = 1. Integrate  x'' = -(3/2) h² x / r⁵  (exact Schwarzschild photon
@@ -289,26 +325,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
         // ---- thin-disk crossing: the ray pierced the disk plane ----
         float s = dot(x, n);
-        if (s * sPrev < 0.0 && trans > 0.02) {
+        if (s * sPrev < 0.0) {
             float tc = sPrev / (sPrev - s);
             vec3  xc = mix(xPrev, x, tc);
             float rc = length(xc);
             if (rc > rin && rc < rout) {
-                float band = smoothstep(rin, rin * 1.25, rc)
-                           * (1.0 - smoothstep(rout * 0.70, rout, rc));
-
                 // disk-plane polar coords for the streak texture
                 float phi   = atan(dot(xc, e2), xc.x);
                 float turns = phi / 6.2831853;
-                float kep   = pow(rin / rc, 1.5);
                 // √(1 − 1.5/r): time runs slower for the inner orbits — the
                 // pattern visibly freezes toward the inner edge; dil winds the
                 // whole disk down as the hole grows
                 float gloc  = sqrt(max(1.0 - 1.5 / rc, 0.02));
-                float swirl = rc * L.wind * 0.12 - diskPhase * kep * gloc * dil;
-                float streaks = vnoiseWrapY(vec2(rc * 2.8, turns * 19.0 + swirl * 3.0), 19.0) * 0.65 +
-                                vnoiseWrapY(vec2(rc * 1.0, turns * 9.0  + swirl * 1.5 + 7.0), 9.0) * 0.35;
-                streaks = 0.35 + L.contr * streaks * streaks;
 
                 // relativistic Doppler + gravitational shift for gas on a
                 // circular geodesic: g = √(1 − 1.5/r) / (1 − β·k̂), with the
@@ -318,15 +346,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 float g      = gloc / max(1.0 + beta * dot(gasdir, normalize(v)), 0.05);
                 g = mix(1.0, g, L.dopp);
 
-                // Shakura–Sunyaev temperature profile, peak normalized to 1
-                float xpr   = max(1.0 - sqrt(rin / rc), 0.0);
-                float tprof = pow(rin / rc, 0.75) * pow(xpr, 0.25) / 0.488;
-                vec3  cbb   = blackbody(L.temp * tprof * g);      // doppler-shifted color
-                float boost = pow(g, L.beam);                     // relativistic beaming
-
-                float density = band * streaks;
-                emitc += trans * cbb * (L.gain * 2.2 * density * tprof * tprof * boost);
-                trans *= 1.0 - clamp(L.opac * density, 0.0, 1.0);
+#ifdef GEOMETRY_PASS
+                if (crossingCount == 0) geometryCrossing0 = vec4(rc, turns, g, 0.0);
+                if (crossingCount == 1) geometryCrossing1 = vec4(rc, turns, g, 0.0);
+                crossingCount++;
+#else
+                shadeCrossing(vec3(rc, turns, g), L, rin, rout, dil, emitc, trans);
+#endif
             }
         }
         sPrev = s;
@@ -335,11 +361,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // rays still wound up near the photon sphere when the budget ran out are
     // as good as captured
     if (!captured && dot(x, x) < 4.0) captured = true;
+#ifdef GEOMETRY_PASS
+    geometryBackground.w = captured ? 1.0 : 0.0;
+#endif
 
     // ---- background: where did the escaped ray come from? ----
     if (!captured) {
         vec3 d = normalize(v);
+#ifndef GEOMETRY_PASS
         bg += stars(d) * L.star * window * shield;
+#endif
         if (d.z < -0.05) {
             // project the straight exit ray onto the terminal sky plane at
             // z = -LENS_DEPTH and map back to screen space
@@ -356,11 +387,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             // rays bent past ~90° never reach the sky plane behind the hole;
             // they fade to the starfield instead of sampling garbage
             float toward = smoothstep(0.05, 0.35, -d.z);
+#ifdef GEOMETRY_PASS
+            geometryBackground.xyz = vec3(suv, toward);
+#else
             bg += desktopSample(suv).rgb * toward;
+#endif
         }
     }
+#ifndef GEOMETRY_PASS
+    }
+#endif
     }
 
+#ifdef GEOMETRY_PASS
+    // Rare rays with more crossings use the exact uncached integrator.
+    if (crossingCount > 2) geometryBackground.w = -1.0;
+    fragColor = vec4(0.0);
+#else
     // disk light is HDR; tonemap it on top of the (untouched) terminal sample
     vec3 diskLight = vec3(1.0) - exp(-emitc * L.expo);
     if(useCustomColor == 1) diskLight = customRGB * max(diskLight.r,max(diskLight.g,diskLight.b));
@@ -397,13 +440,22 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec3 col = bg * trans + diskLight + halo + dust + pulse;
     float a = hasCapture == 1 ? 1.0 : (captured ? 1.0 : clamp(max(col.r,max(col.g,col.b)) + 1.0-trans,0.0,1.0));
     fragColor = vec4(col, a);
+#endif
 }
 
 void main() {
+#ifdef GEOMETRY_PASS
+ geometryBackground=vec4(0.0); geometryCrossing0=vec4(0.0); geometryCrossing1=vec4(0.0);
+#endif
  vec2 coord = vec2(gl_FragCoord.x, iResolution.y-gl_FragCoord.y);
  float r = length(coord/iResolution - 0.5);
+#ifdef GEOMETRY_PASS
+ if(r > 0.5) return;
+ vec4 unused; mainImage(unused, coord);
+#else
  if(r > 0.5) { outputColor=vec4(0); return; }
  vec4 c; mainImage(c, coord);
  float fade=1.0-smoothstep(0.40,0.50,r);
  outputColor=vec4(c.rgb*fade,c.a*fade);
+#endif
 }
