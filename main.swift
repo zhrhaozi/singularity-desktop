@@ -597,7 +597,7 @@ struct SettingsView:View {
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.6")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.7")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
@@ -671,7 +671,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){settings?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.6",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.7",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){savePosition()}
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){

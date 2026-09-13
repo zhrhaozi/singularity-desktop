@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import JavaScriptCore
 func expect(_ condition:Bool,_ name:String){if !condition{fatalError(name)}}
 expect(RGB(hex:"#8a5cff")!.hex=="#8A5CFF","six digit")
 expect(RGB(hex:"abc")!.hex=="#AABBCC","short hex")
@@ -58,6 +59,63 @@ func check(_ condition: @autoclosure () -> Bool, _ name: String) {
 func snapshot(_ state: String, _ id: String? = nil, _ detail: String? = nil) -> CodexStateSnapshot {
     CodexStateSnapshot(state: state, detail: detail, eventID: id)
 }
+for title in ["ChatGPT", "Codex", "Another task", ""] {
+    for path in ["/index.html", "/detached-window.html"] {
+        let target = CodexCDPTarget(title: title, type: "page", url: "app://-\(path)?window=2",
+                                   webSocketDebuggerUrl: "ws://127.0.0.1:9229/devtools/page/fixture")
+        check(target.isCodexWindow && target.socketURL != nil, "window discovery ignores title: \(title)/\(path)")
+    }
+}
+for address in ["https://example.com/index.html", "app://other/index.html", "app://-/index.html.untrusted", "app://-/browser.html"] {
+    check(!CodexCDPTarget(title: "ChatGPT", type: "page", url: address, webSocketDebuggerUrl: nil).isCodexWindow,
+          "reject unrelated target \(address)")
+}
+check(!CodexCDPTarget(title: "ChatGPT", type: "webview", url: "app://-/index.html", webSocketDebuggerUrl: nil).isCodexWindow,
+      "exclude embedded visualizations")
+let optionalTarget = try JSONDecoder().decode(CodexCDPTarget.self, from: Data(#"{"type":"page","url":"app://-/index.html"}"#.utf8))
+check(optionalTarget.isCodexWindow && optionalTarget.socketURL == nil, "missing debug socket does not reject whole discovery response")
+for address in ["ws://example.com:9229/page", "ws://127.0.0.1:9230/page", "https://127.0.0.1:9229/page", "ws://user@localhost:9229/page"] {
+    check(CodexCDPTarget(title: nil, type: "page", url: "app://-/index.html", webSocketDebuggerUrl: address).socketURL == nil,
+          "reject nonlocal or invalid socket \(address)")
+}
+for values in [["idle", "thinking"], ["thinking", "idle"], ["idle", "error", "command"], ["error", "thinking"]] {
+    let combined = CodexDesktopObservation.combine(values.map { snapshot($0) }, incomplete: false)
+    check(combined?.state == (values.contains("command") ? "command" : "thinking"), "busy window wins independent of discovery order")
+}
+check(CodexDesktopObservation.combine([snapshot("idle"), snapshot("idle")], incomplete: false)?.state == "idle", "all windows idle")
+check(CodexDesktopObservation.combine([snapshot("idle")], incomplete: true) == nil, "incomplete coverage cannot claim all windows idle")
+check(CodexDesktopObservation.combine([snapshot("thinking")], incomplete: true)?.state == "thinking", "unresponsive window cannot hide known work")
+check(CodexDesktopObservation.combine([], incomplete: true) == nil, "all probes unavailable")
+check(CodexDesktopObservation.combine([snapshot("complete")], incomplete: false) == nil, "DOM does not manufacture completion")
+
+func desktopState(_ controls: [[String: Any]], busy: [[String: Any]] = []) throws -> String? {
+    let context = JSContext()!
+    let fixtures: [String: Any] = ["controls": controls, "busy": busy]
+    let json = String(data: try JSONSerialization.data(withJSONObject: fixtures), encoding: .utf8)!
+    context.evaluateScript("""
+    const fixtures = \(json);
+    const element = f => ({
+      innerText: f.text || '',
+      hidden: f.hidden || false,
+      getAttribute: n => n === 'aria-label' ? (f.label || '') : null,
+      getClientRects: () => f.detached ? [] : [1]
+    });
+    const document = {querySelectorAll: s => (s.startsWith('[aria-busy') ? fixtures.busy : fixtures.controls).map(element)};
+    const getComputedStyle = e => ({visibility: e.hidden ? 'hidden' : 'visible', display: 'block'});
+    """)
+    let result = context.evaluateScript(CodexDesktopObservation.expression)?.toString()
+    check(context.exception == nil, "DOM adapter executes with fixture elements")
+    guard let result else { return nil }
+    return try JSONDecoder().decode(CodexStateSnapshot.self, from: Data(result.utf8)).state
+}
+for label in ["停止", "Stop", "Stop responding", "Stop generating", "停止生成", "中止任务"] {
+    check((try? desktopState([["label": label, "text": label]])) == "thinking", "localized and duplicate stop labels: \(label)")
+}
+check((try? desktopState([["label": "停止", "hidden": true]])) == "idle", "hidden controls do not imply work")
+check((try? desktopState([], busy: [["hidden": true]])) == "idle", "hidden busy marker is ignored")
+check((try? desktopState([], busy: [[:]])) == "thinking", "visible busy marker")
+check((try? desktopState([["label": "Stop"], ["text": "Running command"]])) == "command", "running command while busy")
+
 for state in CodexActivityState.allCases {
     var machine = CodexStateMachine()
     check(CodexActivityState(token: state.token) == state, "six-state token round trip \(state.token)")

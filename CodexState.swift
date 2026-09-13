@@ -214,20 +214,72 @@ protocol CodexStateProbing: AnyObject {
     func cancel()
 }
 
-private struct CodexCDPTarget: Decodable {
-    let title: String
+struct CodexCDPTarget: Decodable {
+    let title: String?
     let type: String
     let url: String
-    let webSocketDebuggerUrl: String
+    let webSocketDebuggerUrl: String?
+
+    var isCodexWindow: Bool {
+        guard type == "page", let address = URL(string: url) else { return false }
+        return address.scheme == "app" && address.host == "-" &&
+            ["/index.html", "/detached-window.html"].contains(address.path)
+    }
+
+    var socketURL: URL? {
+        guard let text = webSocketDebuggerUrl, let address = URL(string: text),
+              ["ws", "wss"].contains(address.scheme ?? ""),
+              ["127.0.0.1", "localhost", "::1", "[::1]"].contains(address.host ?? ""),
+              address.port == 9229, address.user == nil, address.password == nil else { return nil }
+        return address
+    }
+}
+
+enum CodexDesktopObservation {
+    static let states = ["idle", "error", "thinking", "command"]
+
+    static func combine(_ snapshots: [CodexStateSnapshot], incomplete: Bool) -> CodexStateSnapshot? {
+        let valid = snapshots.filter { states.contains($0.state) }
+        guard let selected = valid.max(by: {
+            states.firstIndex(of: $0.state)! < states.firstIndex(of: $1.state)!
+        }), selected.state != "idle" || !incomplete else { return nil }
+        let descriptions = [
+            "idle": "Codex 工作窗口当前空闲",
+            "thinking": "检测到 Codex 工作窗口正在思考",
+            "command": "检测到 Codex 工作窗口正在运行命令",
+            "error": "检测到 Codex 工作窗口的错误提示"
+        ]
+        let coverage = incomplete ? "部分窗口暂不可用" : "已检查 \(valid.count) 个窗口"
+        return CodexStateSnapshot(state: selected.state, detail: "\(descriptions[selected.state]!)（\(coverage)）")
+    }
+
+    static let expression = """
+    (() => {
+      const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+      const controls = [...document.querySelectorAll('button,[role="button"],[role="status"],[role="alert"],[aria-live]')]
+        .filter(visible)
+        .flatMap(e => [e.getAttribute('aria-label') || '', e.innerText || ''])
+        .map(t => t.trim()).filter(Boolean);
+      const stop = controls.some(t => /^(停止|中止)(生成|回复|响应|任务|运行)?$|^(Stop|Cancel)( (generating|generation|responding|response|task|turn|thread))?$/i.test(t));
+      const busy = [...document.querySelectorAll('[aria-busy="true"],[data-loading="true"]')].some(visible);
+      const command = controls.some(t => /^(正在运行|Running)(?:\\s|$)/i.test(t));
+      const error = controls.some(t => /失败|出错|错误|failed|error/i.test(t));
+      const state = (stop || busy) ? (command ? 'command' : 'thinking') : (error ? 'error' : 'idle');
+      return JSON.stringify({state});
+    })()
+    """
 }
 
 private enum CodexProbeError: Error { case unavailable, timeout, invalidResponse }
 
-/// One bounded HTTP + WebSocket probe at a time. No callback survives cancellation.
+/// One bounded batch checks all Codex windows. No callback survives cancellation.
 final class CodexDesktopProbe: CodexStateProbing {
     private let session: URLSession
     private var dataTask: URLSessionDataTask?
-    private var socket: URLSessionWebSocketTask?
+    private var sockets: [URLSessionWebSocketTask] = []
+    private var observations: [CodexStateSnapshot] = []
+    private var outstanding = 0
+    private var failures = 0
     private var deadline: DispatchWorkItem?
     private var generation: UInt64 = 0
     private var completion: ((Result<CodexStateSnapshot, Error>) -> Void)?
@@ -243,7 +295,8 @@ final class CodexDesktopProbe: CodexStateProbing {
         generation &+= 1
         deadline?.cancel(); deadline = nil
         dataTask?.cancel(); dataTask = nil
-        socket?.cancel(with: .goingAway, reason: nil); socket = nil
+        sockets.forEach { $0.cancel(with: .goingAway, reason: nil) }; sockets.removeAll()
+        observations.removeAll(); outstanding = 0; failures = 0
         completion = nil
     }
 
@@ -253,7 +306,7 @@ final class CodexDesktopProbe: CodexStateProbing {
         self.completion = completion
         let token = generation
         let timeout = DispatchWorkItem { [weak self] in
-            self?.finish(.failure(CodexProbeError.timeout), token: token)
+            self?.finishObservations(token: token)
         }
         deadline = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: timeout)
@@ -262,12 +315,18 @@ final class CodexDesktopProbe: CodexStateProbing {
             DispatchQueue.main.async {
                 guard let self, self.isCurrent(token) else { return }
                 guard error == nil, (response as? HTTPURLResponse)?.statusCode == 200,
-                      let data, let targets = try? JSONDecoder().decode([CodexCDPTarget].self, from: data),
-                      let target = targets.first(where: { $0.type == "page" && $0.title == "ChatGPT" && $0.url.hasPrefix("app://-/index.html") }) else {
+                      let data, let targets = try? JSONDecoder().decode([CodexCDPTarget].self, from: data) else {
                     self.finish(.failure(CodexProbeError.unavailable), token: token)
                     return
                 }
-                self.evaluate(target, token: token)
+                let windows = targets.filter(\.isCodexWindow)
+                // Do not silently ignore windows or trust unrelated browser/webview targets.
+                guard !windows.isEmpty, windows.count <= 16 else {
+                    self.finish(.failure(CodexProbeError.unavailable), token: token)
+                    return
+                }
+                self.outstanding = windows.count
+                windows.forEach { self.evaluate($0, token: token) }
             }
         }
         dataTask?.resume()
@@ -281,55 +340,54 @@ final class CodexDesktopProbe: CodexStateProbing {
         callback(result)
     }
 
+    private func finishObservations(token: UInt64) {
+        guard isCurrent(token) else { return }
+        if let snapshot = CodexDesktopObservation.combine(observations, incomplete: outstanding > 0 || failures > 0) {
+            finish(.success(snapshot), token: token)
+        } else {
+            finish(.failure(CodexProbeError.unavailable), token: token)
+        }
+    }
+
+    private func record(_ result: Result<CodexStateSnapshot, Error>, token: UInt64) {
+        guard isCurrent(token) else { return }
+        switch result {
+        case .success(let snapshot): observations.append(snapshot)
+        case .failure: failures += 1
+        }
+        outstanding -= 1
+        if outstanding == 0 { finishObservations(token: token) }
+    }
+
     private func evaluate(_ target: CodexCDPTarget, token: UInt64) {
-        guard let url = URL(string: target.webSocketDebuggerUrl),
-              ["ws", "wss"].contains(url.scheme ?? ""),
-              ["127.0.0.1", "localhost", "::1", "[::1]"].contains(url.host ?? ""),
-              url.port == 9229 else {
-            finish(.failure(CodexProbeError.invalidResponse), token: token)
+        guard let url = target.socketURL else {
+            record(.failure(CodexProbeError.invalidResponse), token: token)
             return
         }
         let task = session.webSocketTask(with: url)
-        socket = task
+        sockets.append(task)
         task.resume()
-        // Keep the existing DOM adapter; reliable success must come from an explicit event.
-        let expression = """
-        (() => {
-          const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
-          const controls = [...document.querySelectorAll('button,[role="button"],[role="status"],[role="alert"],[aria-live]')]
-            .filter(visible)
-            .map(e => ((e.getAttribute('aria-label') || '') + ' ' + (e.innerText || '')).trim())
-            .filter(Boolean);
-          const stop = controls.some(t => /^(停止|Stop|中止|Cancel)$/i.test(t));
-          const busy = [...document.querySelectorAll('[aria-busy="true"],[data-loading="true"]')].length > 0;
-          const command = controls.some(t => /^(正在运行|Running)(?:\\s|$)/i.test(t));
-          const error = controls.some(t => /失败|出错|错误|failed|error/i.test(t));
-          const state = (stop || busy) ? (command ? 'command' : 'thinking') : (error ? 'error' : 'idle');
-          const detail = state === 'command' ? '检测到正在运行的命令' : state === 'thinking' ? '检测到 Codex 正在思考' : state === 'error' ? '检测到当前错误提示' : 'Codex 当前空闲';
-          return JSON.stringify({state, detail});
-        })()
-        """
-        let payload: [String: Any] = ["id": 1, "method": "Runtime.evaluate", "params": ["expression": expression, "returnByValue": true, "awaitPromise": true]]
+        let payload: [String: Any] = ["id": 1, "method": "Runtime.evaluate", "params": ["expression": CodexDesktopObservation.expression, "returnByValue": true, "awaitPromise": true]]
         guard let encoded = try? JSONSerialization.data(withJSONObject: payload),
               let message = String(data: encoded, encoding: .utf8) else {
-            finish(.failure(CodexProbeError.invalidResponse), token: token)
+            record(.failure(CodexProbeError.invalidResponse), token: token)
             return
         }
         task.send(.string(message)) { [weak self] error in
             DispatchQueue.main.async {
                 guard let self, self.isCurrent(token) else { return }
-                if let error { self.finish(.failure(error), token: token) }
-                else { self.receive(token: token) }
+                if let error { self.record(.failure(error), token: token) }
+                else { self.receive(task, token: token) }
             }
         }
     }
 
-    private func receive(token: UInt64) {
-        socket?.receive { [weak self] result in
+    private func receive(_ task: URLSessionWebSocketTask, token: UInt64) {
+        task.receive { [weak self] result in
             DispatchQueue.main.async {
                 guard let self, self.isCurrent(token) else { return }
                 switch result {
-                case .failure(let error): self.finish(.failure(error), token: token)
+                case .failure(let error): self.record(.failure(error), token: token)
                 case .success(let message):
                     let data: Data?
                     switch message {
@@ -338,11 +396,11 @@ final class CodexDesktopProbe: CodexStateProbing {
                     @unknown default: data = nil
                     }
                     guard let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                        self.finish(.failure(CodexProbeError.invalidResponse), token: token)
+                        self.record(.failure(CodexProbeError.invalidResponse), token: token)
                         return
                     }
                     guard object["id"] as? Int == 1 else {
-                        self.receive(token: token) // Ignore protocol events within the same deadline.
+                        self.receive(task, token: token) // Ignore protocol events within the same deadline.
                         return
                     }
                     guard let outer = object["result"] as? [String: Any],
@@ -350,11 +408,11 @@ final class CodexDesktopProbe: CodexStateProbing {
                           let value = inner["value"] as? String,
                           let bytes = value.data(using: .utf8),
                           let snapshot = try? JSONDecoder().decode(CodexStateSnapshot.self, from: bytes),
-                          CodexActivityState(token: snapshot.state) != nil else {
-                        self.finish(.failure(CodexProbeError.invalidResponse), token: token)
+                          CodexDesktopObservation.states.contains(snapshot.state) else {
+                        self.record(.failure(CodexProbeError.invalidResponse), token: token)
                         return
                     }
-                    self.finish(.success(snapshot), token: token)
+                    self.record(.success(snapshot), token: token)
                 }
             }
         }
