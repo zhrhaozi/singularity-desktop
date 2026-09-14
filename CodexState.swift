@@ -164,6 +164,18 @@ struct CodexStateMachine {
         }
     }
 
+    mutating func pauseObservation(now: TimeInterval) {
+        advance(now: now)
+        lastObservation = nil
+    }
+
+    mutating func resumeObservation(now: TimeInterval) {
+        // Retain busy/event continuity across deliberate invisibility, but bound
+        // the grace period until a fresh observation arrives.
+        advance(now: now)
+        if observationSource != nil { lastObservation = now }
+    }
+
     mutating func unavailable() {
         state = .idle
         source = "等待 Codex 桌面状态"
@@ -437,6 +449,11 @@ final class CodexStateBridge {
     private var generation: UInt64 = 0
     private var inFlight: UInt64?
     private var running = false
+    private var observationPaused = false
+    private var probeFailures = 0
+    private var nextProbeAt = -TimeInterval.infinity
+    var isRunning: Bool { running }
+    var hasScheduledTimer: Bool { timer != nil }
 
     init(model: CodexStateModel, stateFileURL: URL? = nil,
          probe: CodexStateProbing = CodexDesktopProbe(),
@@ -457,11 +474,21 @@ final class CodexStateBridge {
     func start(scheduleTimer: Bool = true) {
         precondition(Thread.isMainThread)
         stop()
+        resume(scheduleTimer: scheduleTimer)
+    }
+
+    func resume(scheduleTimer: Bool = true) {
+        precondition(Thread.isMainThread)
+        guard !running else { return }
         guard model?.codexAuto == true else { return }
+        if observationPaused { machine.resumeObservation(now: now()) }
+        observationPaused = false
         running = true
         lastPoll = -.infinity
+        probeFailures = 0; nextProbeAt = -.infinity
         if scheduleTimer {
             let next = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.poll() }
+            next.tolerance = 0.1
             timer = next
             RunLoop.main.add(next, forMode: .common)
         }
@@ -470,19 +497,39 @@ final class CodexStateBridge {
 
     func stop() {
         precondition(Thread.isMainThread)
+        pause()
+        observationPaused = false
+        machine.unavailable()
+    }
+
+    func pause() {
+        precondition(Thread.isMainThread)
+        if running {
+            machine.pauseObservation(now: now())
+            observationPaused = true
+        }
         running = false
         timer?.invalidate(); timer = nil
         settleWork?.cancel(); settleWork = nil; scheduledDeadline = nil
         cancelProbe()
-        machine.unavailable()
     }
 
-    func restartIfNeeded() {
-        if model?.codexAuto == true { start() }
+    func restartIfNeeded(active: Bool = true) {
+        if model?.codexAuto == true {
+            if active { resume() } else { pause() }
+        }
         else {
             stop()
             if let model { model.setCodexState(model.codexState, source: "手动预览", detail: model.codexDetail) }
         }
+    }
+
+    func refresh() {
+        precondition(Thread.isMainThread)
+        guard running else { return }
+        cancelProbe()
+        probeFailures = 0; nextProbeAt = -.infinity; lastPoll = -.infinity
+        poll()
     }
 
     func poll() {
@@ -496,7 +543,7 @@ final class CodexStateBridge {
         // Expired file ownership is released immediately, without fabricating success.
         if machine.observationSource == .file { machine.unavailable() }
         publish()
-        guard inFlight == nil else { return }
+        guard inFlight == nil, time >= nextProbeAt else { return }
         generation &+= 1
         let token = generation
         inFlight = token
@@ -514,6 +561,7 @@ final class CodexStateBridge {
     private func acceptFreshFile() -> Bool {
         guard let snapshot = CodexStateFile.read(stateFileURL, now: wallNow()) else { return false }
         cancelProbe()
+        probeFailures = 0; nextProbeAt = -.infinity
         machine.accept(snapshot, source: .file, now: now())
         publish()
         return true
@@ -525,10 +573,18 @@ final class CodexStateBridge {
         // Recheck priority now, not just when the HTTP request began.
         if acceptFreshFile() { return }
         inFlight = nil
+        let accepted: Bool
         switch result {
         case .success(let snapshot):
-            if !machine.accept(snapshot, source: .desktop, now: now()) { machine.unavailable() }
-        case .failure: machine.unavailable()
+            accepted = machine.accept(snapshot, source: .desktop, now: now())
+        case .failure: accepted = false
+        }
+        if accepted {
+            probeFailures = 0; nextProbeAt = -.infinity
+        } else {
+            machine.unavailable()
+            probeFailures = min(6, probeFailures + 1)
+            nextProbeAt = now() + min(30, pow(2, Double(probeFailures - 1)))
         }
         publish()
     }

@@ -383,6 +383,77 @@ do {
     bridge.stop()
 }
 
+// Deliberate invisibility preserves task age and event identity, but cancels all work.
+do {
+    let c = TestClock(), m = TestModel(), probe = TestProbe()
+    let bridge = makeBridge(m, probe, c, fixtures.appendingPathComponent("bridge-hidden/codex-state.json"))
+    bridge.start(scheduleTimer: false)
+    probe.succeed(0, snapshot("thinking"))
+    c.time = 1; bridge.poll()
+    bridge.pause()
+    check(!bridge.isRunning && !bridge.hasScheduledTimer, "hidden bridge stops scheduling")
+    c.time = 40; bridge.poll(); bridge.refresh()
+    probe.succeed(1, snapshot("complete", "cancelled-hidden"))
+    check(probe.callbacks.count == 2 && m.codexPulse == 0, "hidden bridge rejects callbacks and refresh")
+    bridge.resume(scheduleTimer: false)
+    let cancels = probe.cancellations
+    bridge.restartIfNeeded(active: true)
+    check(probe.cancellations == cancels && probe.callbacks.count == 3, "visible consumers do not restart an active probe")
+    probe.succeed(2, snapshot("command"))
+    check(m.codexState == .longTask, "show preserves task age across intentional pause")
+    c.time = 41; bridge.poll(); probe.succeed(3, snapshot("error"))
+    check(m.codexPulse == 1, "new visible error pulses")
+    m.codexPulse = 0; bridge.pause()
+    c.time = 80; bridge.resume(scheduleTimer: false)
+    probe.succeed(4, snapshot("error"))
+    check(m.codexPulse == 0, "same DOM error does not replay after hide/show")
+    bridge.pause()
+    c.time = 100; bridge.resume(scheduleTimer: false)
+    c.time = 103; bridge.poll()
+    check(m.codexState == .idle && m.codexPulse == 0, "show gives stale observations only bounded grace")
+    bridge.stop()
+}
+do {
+    let c = TestClock(), m = TestModel(), probe = TestProbe()
+    let file = fixtures.appendingPathComponent("bridge-hidden-result/codex-state.json")
+    try writeFixture(file, snapshot("complete", "hidden-result"), modified: c.date)
+    let bridge = makeBridge(m, probe, c, file)
+    bridge.start(scheduleTimer: false)
+    m.codexPulse = 0; bridge.pause()
+    c.time = 5; bridge.resume(scheduleTimer: false)
+    check(m.codexState == .idle && m.codexPulse == 0, "expired completion settles without replay on show")
+    bridge.stop()
+}
+
+// Endpoint failures back off, while the state file and explicit wake remain responsive.
+do {
+    let c = TestClock(), m = TestModel(), probe = TestProbe()
+    let file = fixtures.appendingPathComponent("bridge-backoff/codex-state.json")
+    let bridge = makeBridge(m, probe, c, file)
+    bridge.start(scheduleTimer: false)
+    for (index, delay) in [1.0, 2, 4, 8, 16, 30, 30].enumerated() {
+        probe.fail(index)
+        let deadline = c.time + delay
+        c.time = deadline - 0.5; bridge.poll()
+        check(probe.callbacks.count == index + 1, "failure backoff suppresses early batch \(index)")
+        c.time = deadline; bridge.poll()
+        check(probe.callbacks.count == index + 2, "failure backoff resumes bounded batch \(index)")
+    }
+    probe.fail(7)
+    c.time += 1; bridge.refresh()
+    check(probe.callbacks.count == 9, "process launch refresh bypasses failure backoff")
+    probe.succeed(8, snapshot("thinking"))
+    c.time += 1; bridge.poll()
+    check(probe.callbacks.count == 10, "success restores normal cadence")
+    probe.fail(9)
+    c.time += 1; bridge.poll(); probe.fail(10)
+    c.time += 0.5
+    try writeFixture(file, snapshot("command"), modified: c.date)
+    bridge.poll()
+    check(m.codexState == .command && probe.callbacks.count == 11, "fresh file bypasses desktop backoff")
+    bridge.stop()
+}
+
 // Exercise the real completion deadline and cancelled deadline on the main run loop.
 // Unlike the deterministic reducer tests, neither bridge is polled to force settling.
 do {

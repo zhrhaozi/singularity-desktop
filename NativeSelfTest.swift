@@ -87,6 +87,8 @@ enum NativeSelfTest {
                 await regionCaptureChecks(app,screen:screen)
                 await streamStartRetargetChecks(app,screen:screen)
                 if let backdrop {await adaptiveCaptureChecks(app,screen:screen,backdrop:backdrop)}
+                await codexVisibilityChecks(app)
+                await waitForCapture(app,active:true)
                 await app.suspendActivity(.display)
                 await app.suspendActivity(.session)
                 let dormant=app.view.drawnFrames
@@ -358,6 +360,32 @@ enum NativeSelfTest {
         await capture.resume(.display,screen:screen)
         await waitForCapture(app,active:true)
         capturedRenderCheck(app.view)
+
+        await capture.suspend(.display)
+        await capture.resume(.display,screen:nil)
+        require(capture.awaitingScreen && capture.activeID==nil,"nil-screen wake retains restore intent")
+        await capture.resume(.display,screen:screen)
+        require(capture.awaitingScreen,"duplicate wake does not consume pending screen recovery")
+        await capture.retarget(screen:screen)
+        await waitForCapture(app,active:true)
+        let resumed=capture.activeID
+        await capture.retarget(screen:screen)
+        require(!capture.awaitingScreen && capture.activeID==resumed,"same screen restores once without replacing source")
+        capturedRenderCheck(app.view)
+
+        await capture.suspend(.display)
+        await capture.resume(.display,screen:nil)
+        await waitForCapture(app,active:true)
+        require(!capture.awaitingScreen,"short wake check restores without another screen notification")
+        await capture.suspend(.display)
+        await capture.resume(.display,screen:nil)
+        await capture.start(screen:nil,requestPermission:false)
+        try? await Task.sleep(nanoseconds:1_200_000_000)
+        await capture.retarget(screen:screen)
+        require(!capture.awaitingScreen && !capture.wantsCapture && capture.activeID==nil,"hide cancels pending screen restoration")
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        log("CAPTURE_WAKE_TEST_PASS nil-screen same-screen duplicate-wake timer-fallback cancelled-restore")
         for code in [-3817,-3801,-3821] {
             interrupt(code)
             try? await Task.sleep(nanoseconds:1_200_000_000)
@@ -369,6 +397,48 @@ enum NativeSelfTest {
             await waitForCapture(app,active:true)
         }
         log("CAPTURE_RECOVERY_TEST_PASS active-interruption fresh-texture cancelled-retry lifecycle terminal-stops")
+    }
+
+    @MainActor static func codexVisibilityChecks(_ app:AppDelegate) async {
+        final class Probe:CodexStateProbing {
+            var polls=0
+            func poll(completion:@escaping(Result<CodexStateSnapshot,Error>)->Void) {
+                polls+=1;completion(.success(CodexStateSnapshot(state:"idle")))
+            }
+            func cancel() {}
+        }
+        let previous=app.codexBridge,oldAuto=model.codexAuto
+        let probe=Probe()
+        let file=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("singularity-no-state-\(UUID())")
+        let bridge=CodexStateBridge(model:model,stateFileURL:file,probe:probe)
+        defer {
+            bridge.stop();app.codexBridge=previous;model.codexAuto=oldAuto
+            app.settings.orderOut(nil);app.restartCodexBridge()
+        }
+        app.settings.orderOut(nil);model.codexAuto=true;app.codexBridge=bridge
+        app.restartCodexBridge()
+        require(bridge.isRunning && bridge.hasScheduledTimer,"visible pet starts bridge")
+        app.togglePet()
+        let hiddenPolls=probe.polls
+        try? await Task.sleep(nanoseconds:2_200_000_000)
+        require(!bridge.isRunning && !bridge.hasScheduledTimer && probe.polls==hiddenPolls,"hidden pet and closed settings have no polling")
+        app.showSettings()
+        require(bridge.isRunning && probe.polls>hiddenPolls,"settings keep state live while pet hidden")
+        app.settings.miniaturize(nil)
+        try? await Task.sleep(nanoseconds:300_000_000)
+        require(!bridge.isRunning,"minimized settings with hidden pet suspend bridge")
+        app.showSettings()
+        require(bridge.isRunning,"restored settings resume bridge")
+        app.settings.performClose(nil)
+        require(!bridge.isRunning && !bridge.hasScheduledTimer,"settings close suspends hidden bridge")
+        app.togglePet()
+        require(bridge.isRunning && bridge.hasScheduledTimer,"shown pet resumes bridge")
+        await app.suspendActivity(.display)
+        model.codexAuto=false;model.codexAuto=true
+        require(!bridge.isRunning,"auto toggle cannot restart bridge while display suspended")
+        await app.resumeActivity(.display)
+        require(bridge.isRunning,"display resume restores visible bridge")
+        log("CODEX_VISIBILITY_TEST_PASS hidden-no-poll settings-live minimize close show suspend")
     }
 
     static func launchBackdrop()->Process? {
@@ -700,6 +770,27 @@ enum NativeSelfTest {
         capture.selfTestScreenshotDelay=0
         require(model.capturing && capture.stream != nil && capture.activeID != previous,"stalled snapshot falls back to a fresh stream")
         capturedRenderCheck(app.view)
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        require(capture.stream != nil,"automatic reconnect retains safe backend fallback")
+        let requestsBeforeRetry=capture.screenshotRequests
+        await capture.start(screen:screen,requestPermission:false,retryPreferredBackend:true)
+        await waitForCapture(app,active:true)
+        require(capture.stream==nil && capture.screenshotRequests>requestsBeforeRetry,"explicit reconnect restores preferred screenshot backend")
+        capturedRenderCheck(app.view)
+        capture.selfTestScreenshotDelay=4_000_000_000
+        for _ in 0..<120 {
+            try? await Task.sleep(nanoseconds:50_000_000)
+            if model.capturing && capture.stream != nil {break}
+        }
+        capture.selfTestScreenshotDelay=0
+        require(model.capturing && capture.stream != nil,"persistent failure returns to bounded stream fallback")
+        let settledRequests=capture.screenshotRequests
+        try? await Task.sleep(nanoseconds:1_200_000_000)
+        require(capture.screenshotRequests==settledRequests,"fallback never automatically oscillates back to screenshots")
+        await capture.start(screen:screen,requestPermission:false,retryPreferredBackend:true)
+        await waitForCapture(app,active:true)
+        log("CAPTURE_BACKEND_RETRY_TEST_PASS explicit-restore normal-reconnect persistent-failure no-oscillation")
         log("CAPTURE_SNAPSHOT_TEST_PASS late-frame pause resume timeout stream-fallback real-background")
     }
 

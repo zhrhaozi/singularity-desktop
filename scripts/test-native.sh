@@ -22,6 +22,8 @@ grep -F 'CAPTURE_POLICY_TEST_PASS' "$LOG_DIR/pass.log"
 grep -F 'CAPTURE_PIXEL_TEST_PASS' "$LOG_DIR/pass.log"
 if grep -Fq 'CAPTURE_TEST_PASS' "$LOG_DIR/pass.log"; then
   grep -F 'CAPTURE_RECOVERY_TEST_PASS' "$LOG_DIR/pass.log"
+  grep -F 'CAPTURE_WAKE_TEST_PASS' "$LOG_DIR/pass.log"
+  grep -F 'CODEX_VISIBILITY_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_START_RETARGET_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_REFRESH_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_RENDER_TEST_PASS' "$LOG_DIR/pass.log"
@@ -33,6 +35,7 @@ if grep -Fq 'CAPTURE_TEST_PASS' "$LOG_DIR/pass.log"; then
   fi
   if [[ "$(sw_vers -productVersion)" != 13.* && "${SINGULARITY_CAPTURE_BACKEND:-}" != stream ]]; then
     grep -F 'CAPTURE_SNAPSHOT_TEST_PASS' "$LOG_DIR/pass.log"
+    grep -F 'CAPTURE_BACKEND_RETRY_TEST_PASS' "$LOG_DIR/pass.log"
     grep -F 'CAPTURE_ADAPTIVE_TEST_PASS' "$LOG_DIR/pass.log"
   fi
 fi
