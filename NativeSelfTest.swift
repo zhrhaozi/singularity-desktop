@@ -18,11 +18,19 @@ enum NativeSelfTest {
         if CommandLine.arguments.contains("--self-test-fail") {
             require(false,"intentional failure validates the release test runner")
         }
-        model.codexAuto=false;model.wander=false
+        model.codexAuto=false;model.wander=false;model.bodyCount=1
         let oldSize=model.size,oldOrigin=app.pet.frame.origin
         for size in [280.0,440.0,700.0] {
             model.size=size
             require(abs(app.pet.frame.width-size)<1,"resize \(size)")
+        }
+        if let screen=app.pet.screen ?? NSScreen.main {
+            model.size=280
+            app.pet.setFrameOrigin(CGPoint(x:screen.visibleFrame.maxX-280,y:screen.visibleFrame.midY-140))
+            model.bodyCount=3
+            require(app.pet.frame.origin==PetPlacement.recoveredOrigin(for:app.pet.frame,screens:app.petScreens),
+                    "switching to a larger system keeps the window on an available screen")
+            model.bodyCount=1
         }
         model.size=oldSize
         app.pet.setFrameOrigin(NSPoint(x:oldOrigin.x+30,y:oldOrigin.y+20))
@@ -38,6 +46,7 @@ enum NativeSelfTest {
         glGetProgramiv(app.view.program,GLenum(GL_LINK_STATUS),&linked)
         require(linked==1,"GL link status")
         renderChecks(app.view)
+        multiBodyRenderChecks(app.view)
         recoveryPolicyChecks()
         snapshotPixelChecks()
         if CommandLine.arguments.contains("--self-test-render-only") {
@@ -85,6 +94,7 @@ enum NativeSelfTest {
                 await waitForCapture(app,active:true)
                 await recoveryChecks(app,screen:screen)
                 await regionCaptureChecks(app,screen:screen)
+                await multiBodyCaptureChecks(app,screen:screen)
                 await streamStartRetargetChecks(app,screen:screen)
                 if let backdrop {await adaptiveCaptureChecks(app,screen:screen,backdrop:backdrop)}
                 await codexVisibilityChecks(app)
@@ -126,8 +136,17 @@ enum NativeSelfTest {
     @MainActor static func performanceRun(_ app:AppDelegate) {
         model.codexAuto=false;model.wander=false;model.paused=false
         model.setCodexState(.longTask,source:"performance-test")
+        app.pet.ignoresMouseEvents=true
+        for menu in [app.status.menu,NSApp.mainMenu?.items.first?.submenu] {
+            menu?.autoenablesItems=false
+            for item in menu?.items ?? [] where item.action != #selector(AppDelegate.quit) {
+                item.isEnabled=false
+            }
+        }
+        let fixedAppearance=[model.size,model.mass,model.lens,model.brightness,model.speed,
+                             model.spin,model.charge,model.tilt,model.roll]
         let experimental=ProcessInfo.processInfo.environment.keys.contains {
-            $0.hasPrefix("SINGULARITY_BENCHMARK_") && !["SINGULARITY_BENCHMARK_SECONDS","SINGULARITY_BENCHMARK_BACKEND"].contains($0)
+            $0.hasPrefix("SINGULARITY_BENCHMARK_") && !["SINGULARITY_BENCHMARK_SECONDS","SINGULARITY_BENCHMARK_BACKEND","SINGULARITY_BENCHMARK_MULTIBODY"].contains($0)
         }
         if experimental {app.capture.forceStream=true;app.capture.framesPerSecond=30}
         Task{@MainActor in
@@ -137,7 +156,37 @@ enum NativeSelfTest {
             let frames=app.view.drawnFrames,imports=app.view.importedFrames,copies=app.view.copiedFrames
             let duration=min(300,max(20,Double(ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_SECONDS"] ?? "") ?? 75))
             log("PERFORMANCE_RUN_BEGIN pid=\(getpid()) size=\(model.size) mass=\(model.mass) cache=\(app.view.geometryCache?.rebuilds ?? 0)")
-            if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ADAPTIVE"]=="1" {
+            if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_MULTIBODY"]=="1" {
+                app.settings.orderOut(nil)
+                for count in [0,1,2,3] {
+                    if count==0 {
+                        if model.visible {app.togglePet()}
+                        await app.capture.start(screen:nil)
+                    } else {
+                        model.bodyCount=count
+                        if !model.visible {app.togglePet()}
+                        await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                        await waitForCapture(app,active:true)
+                    }
+                    try? await Task.sleep(nanoseconds:15_000_000_000)
+                    let draws=app.view.drawnFrames,requests=app.capture.screenshotRequests
+                    let rebuilds=app.view.multiLens.cacheRebuilds
+                    let begin=ProcessInfo.processInfo.systemUptime
+                    log("MULTIBODY_PERFORMANCE_BEGIN uptime=\(begin) count=\(count) window=\(app.pet.frame.size)")
+                    try? await Task.sleep(nanoseconds:UInt64(duration*1_000_000_000))
+                    let elapsed=ProcessInfo.processInfo.systemUptime-begin
+                    require([model.size,model.mass,model.lens,model.brightness,model.speed,
+                             model.spin,model.charge,model.tilt,model.roll]==fixedAppearance,
+                            "benchmark appearance changed during sampling")
+                    if count==0 {
+                        require(!model.visible && !model.capturing && app.view.drawnFrames==draws &&
+                                app.capture.screenshotRequests==requests,"hidden benchmark has no rendering or capture")
+                    } else {
+                        require(model.visible && model.bodyCount==count && model.capturing,"benchmark mode stays active")
+                    }
+                    log("MULTIBODY_PERFORMANCE_END uptime=\(ProcessInfo.processInfo.systemUptime) count=\(count) fps=\(Double(app.view.drawnFrames-draws)/elapsed) screenshots=\(app.capture.screenshotRequests-requests) cache-rebuilds=\(app.view.multiLens.cacheRebuilds-rebuilds)")
+                }
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ADAPTIVE"]=="1" {
                 app.capture.forceStream=false;app.capture.framesPerSecond=10
                 for mode in ["fixed","adaptive","fixed","adaptive"] {
                     app.capture.adaptiveSampling=mode=="adaptive"
@@ -622,6 +671,42 @@ enum NativeSelfTest {
         return with
     }
 
+    @MainActor static func multiBodyCaptureChecks(_ app:AppDelegate,screen:NSScreen) async {
+        let oldCount=model.bodyCount,oldPaused=model.paused,origin=app.pet.frame.origin
+        defer {
+            model.bodyCount=oldCount;model.paused=oldPaused
+            app.pet.setFrameOrigin(origin);app.checkScreen()
+        }
+        model.paused=true
+        for count in [2,3] {
+            model.bodyCount=count
+            app.pet.setFrameOrigin(CGPoint(x:screen.visibleFrame.midX-app.pet.frame.width/2,
+                                          y:screen.visibleFrame.midY-app.pet.frame.height/2))
+            await app.capture.retarget(screen:screen)
+            await waitForCapture(app,active:true)
+            let bodies=app.view.orbitalBodies
+            var previous=capturedRenderCheck(app.view),changes=0
+            if ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_FIXTURE"] != nil {
+                for _ in 0..<50 {
+                    try? await Task.sleep(nanoseconds:100_000_000)
+                    let current=capturedRenderCheck(app.view)
+                    if current != previous {changes+=1;previous=current}
+                    if changes>=4 {break}
+                }
+                require(changes>=4,"multi live desktop keeps refreshing while paused count=\(count)")
+            }
+            require(app.view.orbitalBodies==bodies,"paused multi-body positions stay fixed")
+            app.togglePet()
+            await waitForCapture(app,active:false)
+            require(app.view.timer==nil && !app.view.multiLens.hasResources,"hidden multi releases rendering")
+            app.togglePet()
+            await waitForCapture(app,active:true)
+            capturedRenderCheck(app.view)
+            require(app.view.multiLens.hasResources,"multi restores live desktop after show")
+            log("MULTIBODY_CAPTURE_TEST_PASS count=\(count) changed-renders=\(changes) paused-background hide-show")
+        }
+    }
+
     @MainActor static func regionCaptureChecks(_ app:AppDelegate,screen:NSScreen) async {
         guard #available(macOS 13.1, *) else{return}
         let capture=app.capture,origin=app.pet.frame.origin,oldPaused=model.paused
@@ -961,5 +1046,119 @@ enum NativeSelfTest {
             guard let png=rep.representation(using:.png,properties:[:]) else {require(false,"PNG encoding");return}
             try png.write(to:directory.appendingPathComponent(name+".png"),options:.atomic)
         } catch {require(false,"PNG output: \(error)")}
+    }
+
+    static func multiBodyRenderChecks(_ view:PetView) {
+        let oldCount=model.bodyCount,oldSize=model.size,oldCapture=model.capturing
+        let oldRect=view.capture.screenRect,oldOrigin=view.window?.frame.origin
+        var previous:GLint=0,fbo:GLuint=0,color:GLuint=0
+        glGetIntegerv(GLenum(GL_FRAMEBUFFER_BINDING),&previous)
+        glGenFramebuffers(1,&fbo);glGenTextures(1,&color)
+        glBindFramebuffer(GLenum(GL_FRAMEBUFFER),fbo)
+        defer {
+            model.bodyCount=oldCount;model.size=oldSize;model.capturing=oldCapture
+            if let oldOrigin {view.window?.setFrameOrigin(oldOrigin)}
+            view.capture.screenRect=oldRect
+            view.uploaded=nil
+            glBindFramebuffer(GLenum(GL_FRAMEBUFFER),GLuint(previous))
+            glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&color)
+        }
+        var buffer:CVPixelBuffer?
+        require(CVPixelBufferCreate(kCFAllocatorDefault,128,128,kCVPixelFormatType_32BGRA,
+                                   [kCVPixelBufferIOSurfacePropertiesKey as String:[:]] as CFDictionary,&buffer)==kCVReturnSuccess,"multi texture")
+        guard let buffer else {require(false,"multi texture exists");return}
+        CVPixelBufferLockBaseAddress(buffer,[])
+        let base=CVPixelBufferGetBaseAddress(buffer)!.assumingMemoryBound(to:UInt8.self),row=CVPixelBufferGetBytesPerRow(buffer)
+        for y in 0..<128 {for x in 0..<128 {
+            let offset=y*row+x*4
+            base[offset]=UInt8(x*2);base[offset+1]=UInt8(y*2)
+            base[offset+2]=UInt8((x/16+y/16)%2==0 ? 220:30);base[offset+3]=255
+        }}
+        CVPixelBufferUnlockBaseAddress(buffer,[])
+        func pixels(_ size:Int,capture:Bool=true,cpu:Bool=false,uncached:Bool=false)->[UInt8] {
+            glBindFramebuffer(GLenum(GL_FRAMEBUFFER),fbo)
+            glActiveTexture(GLenum(GL_TEXTURE0));glBindTexture(GLenum(GL_TEXTURE_2D),color)
+            glTexImage2D(GLenum(GL_TEXTURE_2D),0,GL_RGBA8,GLsizei(size),GLsizei(size),0,GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),nil)
+            glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER),GLenum(GL_COLOR_ATTACHMENT0),GLenum(GL_TEXTURE_2D),color,0)
+            glDrawBuffer(GLenum(GL_COLOR_ATTACHMENT0));glReadBuffer(GLenum(GL_COLOR_ATTACHMENT0))
+            model.capturing=capture
+            view.renderFrame(width:GLsizei(size),height:GLsizei(size),useCapture:capture,captureBuffer:capture ? buffer:nil,
+                             captureSourceRect:view.window?.frame,forceCPUUpload:cpu,forceUncachedGeometry:uncached)
+            var data=[UInt8](repeating:0,count:size*size*4)
+            data.withUnsafeMutableBytes {glReadPixels(0,0,GLsizei(size),GLsizei(size),GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
+            require(glGetError()==GL_NO_ERROR,"multi framebuffer render/readback")
+            return data
+        }
+        model.bodyCount=1;model.style=0;model.kind=0;model.mass=0.85;model.tilt=1.30;model.roll=0.12
+        model.setCodexState(.idle,source:"multi-self-test");model.codexPulse=0
+        let single=pixels(560)
+        var cases=0
+        for count in [2,3] {
+            model.bodyCount=count
+            require(view.orbitalBodies.count==count,"body count \(count)")
+            for size in [280,560,1120] {
+                for style in 0...3 {
+                    model.style=style
+                    let image=pixels(size)
+                    require(view.multiLens.available && view.multiLens.hasResources,"multi renderer active")
+                    require(image[3]==0 && image[(size*size-1)*4+3]==0,"multi transparent corners")
+                    let alphaPixels=stride(from:3,to:image.count,by:4).filter{image[$0]>240}.count
+                    require(alphaPixels>size*size/30 && alphaPixels<size*size*3/4,"multi bounded nonblank coverage")
+                    let direct=pixels(size,uncached:true)
+                    let delta=zip(image,direct).map{abs(Int($0)-Int($1))}.max() ?? 0
+                    require(delta<=3,"multi cached/reference count=\(count) size=\(size) style=\(style) delta=\(delta)")
+                    if size==560 && style==0 {savePNG(image,size:size,name:"multi-\(count)-desktop")}
+                    cases+=1
+                }
+            }
+            model.style=0
+            let imported=pixels(560),cpu=pixels(560,cpu:true)
+            require((zip(imported,cpu).map{abs(Int($0)-Int($1))}.max() ?? 0)<=3,"multi zero-copy orientation/color")
+            view.multiLens.stacksLensing=false
+            let independent=pixels(560)
+            view.multiLens.stacksLensing=true
+            let coupledDifference=zip(imported,independent).filter{abs(Int($0)-Int($1))>3}.count
+            require(coupledDifference>100,"foreground lens samples the previous body, not just the desktop")
+            let bare=pixels(560,capture:false)
+            require(stride(from:0,to:bare.count,by:4).filter{bare[$0]>30 || bare[$0+1]>30}.count>30,"multi no-permission visible disks")
+            savePNG(bare,size:560,name:"multi-\(count)-transparent")
+            let still=pixels(560)
+            let rebuilds=view.multiLens.cacheRebuilds,allocations=view.multiLens.allocations
+            require(pixels(560)==still,"multi frozen state deterministic")
+            let stationaryBodies=view.orbitalBodies
+            for _ in 0..<30 {view.advanceAnimation(dt:1.0/30)}
+            let flowing=pixels(560)
+            require(view.orbitalBodies==stationaryBodies,"light flow does not move bodies")
+            let flowChanges=zip(still,flowing).filter{abs(Int($0)-Int($1))>8}.count
+            require(flowChanges>100,"multi light flow remains visible independently of orbit movement")
+            savePNG(flowing,size:560,name:"multi-\(count)-flow")
+            for _ in 0..<30 {view.orbits?.advance(dt:1.0/30,speed:0.65);view.advanceAnimation(dt:1.0/30)}
+            require(pixels(560) != still,"multi animation and orbital movement")
+            require(view.multiLens.cacheRebuilds==rebuilds,"orbital motion keeps ray geometry")
+            require(view.multiLens.allocations==allocations,"orbital motion reuses scene buffers")
+            for body in view.orbitalBodies {
+                let r=MultiLensRenderer.rect(for:body)
+                let point=CGPoint(x:r.midX*view.bounds.width,y:(1-r.midY)*view.bounds.height)
+                require(view.hitsBody(point,margin:0.27),"multi drag hit target")
+            }
+            view.setRenderingActive(false)
+            require(!view.multiLens.hasResources && view.timer==nil,"hidden multi releases buffers and timer")
+            view.setRenderingActive(true)
+            _=pixels(560)
+            require(view.multiLens.hasResources,"multi resumes rendering")
+            view.resetOrbits()
+            for _ in 0..<14_400 {
+                view.orbits?.advance(dt:1.0/120)
+                if view.orbitalBodies.contains(where:{$0.impact>0.1}) {break}
+            }
+            require(view.orbitalBodies.contains(where:{$0.impact>0.1}),"multi contact produces a collision pulse")
+            savePNG(pixels(560),size:560,name:"multi-\(count)-collision")
+        }
+        model.bodyCount=1;model.style=0
+        // Animation has advanced, so compare the reference at the same phases instead.
+        let restored=pixels(560),reference=pixels(560,uncached:true)
+        require((zip(restored,reference).map{abs(Int($0)-Int($1))}.max() ?? 0)<=2,"single path remains valid after switching")
+        require(single[3]==0,"single baseline transparency")
+        log("MULTIBODY_RENDER_TEST_PASS \(cases) cached-reference zero-copy transparency coupled-lensing motion light-flow collision stable-cache lifecycle hits")
     }
 }

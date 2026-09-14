@@ -5,6 +5,12 @@
 uniform sampler2D desktop;
 uniform sampler2DRect desktopSurface;
 uniform int useDesktopSurface;
+uniform int stackedMode;
+uniform sampler2D stackedScene;
+uniform vec4 bodySceneRect;
+uniform vec2 viewportOrigin;
+uniform float encounterStrength;
+uniform float collisionStrength;
 uniform vec2 iResolution;
 uniform vec4 captureRect;
 uniform float iTime, LENS_DEPTH, temperature, inclination, rollAngle, brightness;
@@ -27,8 +33,13 @@ flat in vec4 dustCenters[9];
 out vec4 outputColor;
 #endif
 vec4 desktopSample(vec2 uv) {
+ if(stackedMode == 1) {
+     vec2 source = bodySceneRect.xy + uv * bodySceneRect.zw;
+     return texture(stackedScene, vec2(source.x, 1.0 - source.y));
+ }
  if(hasCapture == 0) return vec4(0.0);
- vec2 sourceUV = captureRect.xy + uv * captureRect.zw;
+ vec2 sampleUV = stackedMode == 2 ? bodySceneRect.xy + uv * bodySceneRect.zw : uv;
+ vec2 sourceUV = captureRect.xy + sampleUV * captureRect.zw;
  if(useDesktopSurface == 1) return texture(desktopSurface, sourceUV * vec2(textureSize(desktopSurface)));
  return texture(desktop, sourceUV);
 }
@@ -204,6 +215,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
  float trail = clamp(codexTrailSmooth > 0.001 ? codexTrailSmooth : codexTrail, 0.0, 1.0);
  DiskLook L = DiskLook(temperature, inclination, rollAngle, 1.8, 8.0, 0.9, 0.6, 2.5, brightness, 1.6, 7.0, 5.0, 1.4, 0.0);
  L.gain *= 1.0 + energy * 0.52;
+ L.gain *= 1.0 + encounterStrength * 0.22;
  L.opac *= 1.0 + energy * 0.16;
  L.speed *= 1.0 + energy * 0.34;
  if(style == 2) { L.incl = 0.45; L.inner = 2.2; L.outer = 6.0; }
@@ -277,12 +289,13 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     } else {
 
 #ifndef GEOMETRY_PASS
-    vec4 mapping = useGeometryCache == 1 ? texelFetch(geometryMap, ivec2(gl_FragCoord.xy), 0) : vec4(0.0, 0.0, 0.0, -1.0);
+    ivec2 localPixel = ivec2(gl_FragCoord.xy - viewportOrigin);
+    vec4 mapping = useGeometryCache == 1 ? texelFetch(geometryMap, localPixel, 0) : vec4(0.0, 0.0, 0.0, -1.0);
     if (mapping.w >= 0.0) {
         captured = mapping.w > 0.5;
         bg = desktopSample(mapping.xy).rgb * mapping.z;
-        shadeCrossing(texelFetch(crossingMap0, ivec2(gl_FragCoord.xy), 0).xyz, L, rin, rout, dil, emitc, trans);
-        shadeCrossing(texelFetch(crossingMap1, ivec2(gl_FragCoord.xy), 0).xyz, L, rin, rout, dil, emitc, trans);
+        shadeCrossing(texelFetch(crossingMap0, localPixel, 0).xyz, L, rin, rout, dil, emitc, trans);
+        shadeCrossing(texelFetch(crossingMap1, localPixel, 0).xyz, L, rin, rout, dil, emitc, trans);
     } else {
 #endif
     // ====================== near field: trace the geodesic ==================
@@ -407,6 +420,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // disk light is HDR; tonemap it on top of the (untouched) terminal sample
     vec3 diskLight = vec3(1.0) - exp(-emitc * L.expo);
     if(useCustomColor == 1) diskLight = customRGB * max(diskLight.r,max(diskLight.g,diskLight.b));
+    if(stackedMode != 0 && style != 3) {
+        // A smooth projected sweep stays legible without amplifying subpixel
+        // geodesic crossings into flickering high-contrast speckles.
+        vec2 diskPoint = rot(p, -L.roll);
+        float angle = atan(diskPoint.y / max(abs(cos(L.incl)), 0.20), diskPoint.x);
+        float phase = angle - diskPhase * 0.65;
+        float arc = pow(0.5 + 0.5 * cos(phase), 3.0);
+        float ripple = 0.5 + 0.5 * sin(phase * 2.0 + plen / max(rh, 1e-4));
+        diskLight *= 0.24 + 0.74 * arc + 0.14 * ripple;
+    }
     // Local procedural halo: it carries the long-task trail without sampling
     // offset desktop texels, so the black-hole shadow stays uncontaminated by
     // a second, misregistered copy of the work area.
@@ -438,6 +461,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float pulseClear = smoothstep(1.08 * rh, 1.34 * rh, plen);
     vec3 pulse = pulseColor * codexPulse * pulseRing * pulseMotion * pulseClear * 1.25;
     vec3 col = bg * trans + diskLight + halo + dust + pulse;
+    if(stackedMode != 0 && style != 3) {
+        float rim = exp(-pow((plen - rh * 1.035) / max(rh * 0.025, 1e-5), 2.0));
+        vec3 rimColor = useCustomColor == 1 ? customRGB : blackbody(L.temp);
+        col += rimColor * rim * (0.18 + encounterStrength * 0.20);
+        float shockRadius = rh * (1.25 + (1.0 - collisionStrength) * 1.5);
+        float shock = exp(-pow((plen - shockRadius) / max(rh * 0.10, 1e-5), 2.0));
+        col += rimColor * shock * collisionStrength * 0.65 *
+               smoothstep(1.08 * rh, 1.25 * rh, plen);
+    }
     float a = hasCapture == 1 ? 1.0 : (captured ? 1.0 : clamp(max(col.r,max(col.g,col.b)) + 1.0-trans,0.0,1.0));
     fragColor = vec4(col, a);
 #endif
@@ -447,7 +479,8 @@ void main() {
 #ifdef GEOMETRY_PASS
  geometryBackground=vec4(0.0); geometryCrossing0=vec4(0.0); geometryCrossing1=vec4(0.0);
 #endif
- vec2 coord = vec2(gl_FragCoord.x, iResolution.y-gl_FragCoord.y);
+ vec2 pixel = gl_FragCoord.xy - viewportOrigin;
+ vec2 coord = vec2(pixel.x, iResolution.y-pixel.y);
  float r = length(coord/iResolution - 0.5);
 #ifdef GEOMETRY_PASS
  if(r > 0.5) return;

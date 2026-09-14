@@ -19,6 +19,8 @@ A native macOS black-hole desktop pet with live desktop lensing, draggable posit
 | 功能 | 配置 |
 | --- | --- |
 | 黑洞分型 | Schwarzschild、Kerr、Reissner–Nordström、Kerr–Newman |
+| 黑洞系统 | 单体、双体、三体；相互绕行、近掠、碰撞回弹、系统漂移 |
+| 多体光效 | 叠加背景透镜、旋转亮弧、不同盘面流向、近掠增亮和碰撞光环 |
 | 分型参数 | 质量尺度、自旋方向与强度、电荷；按分型显示 |
 | 吸积盘 | 炽金、冷蓝、星环、纯透镜 |
 | 外观参数 | 大小、透镜强度、亮度、倾角、画面旋转、盘面流动速度 |
@@ -31,6 +33,14 @@ A native macOS black-hole desktop pet with live desktop lensing, draggable posit
 关闭设置后开始漫游。鼠标靠近、拖动或打开设置时暂停，方便操作；隐藏时停止桌面采样。移动范围限定在当前显示器的可用区域，避开菜单栏和 Dock。
 
 自定义颜色只作用于吸积盘，保留背景原色。**纯透镜模式没有吸积盘，选择其他风格才能看到盘色变化。** 错误 HEX 输入会保留上次有效颜色。
+
+### 多体系统（1.3.0）
+
+「黑洞系统」可切换单体、双体或三体。双体相互绕行，三体包含一个反向运行成员，通过引力、近掠和碰撞持续改变相对位置。公转速度与盘面流动速度分别调节；「系统漂移」默认开启，让整体在同一窗口内缓慢游移。重置按钮恢复固定初始条件，不改变外观设置。
+
+打开设置仍可预览公转，鼠标接近黑洞或拖动时暂停轨道，便于操作。「暂停流动」同时暂停盘面、公转、系统漂移和桌面漫游，但背景透镜继续响应桌面变化。桌面随机漫游是单独选项，关闭时不会在不同应用上方到处移动。切换多体模式会扩大系统窗口以容纳多个黑洞。
+
+多个黑洞共用一个桌面采集源、一套 Codex 检测和一个渲染时钟。两个可复用场景纹理逐层合成，前景黑洞能够扭曲已经绘制的背景黑洞；各自的光线几何缓存不会随位置、盘面光流或碰撞脉冲重新计算。隐藏和休眠会停止绘制并释放这些纹理。**多体仍比单体需要更多像素合成和显存，不代表零额外开销。**
 
 ## Codex 状态联动
 
@@ -64,6 +74,10 @@ A native macOS black-hole desktop pet with live desktop lensing, draggable posit
 Schwarzschild 模式沿用上游着色器的数值光线积分。Kerr 及带电分型是在该基础上实现的**视觉近似**，用局部坐标扭曲、偏移、尺寸变化及盘面参数表达不同外观，**不是精确求解 Kerr / Kerr–Newman 度规的光线追踪器**。
 
 质量尺度是视觉倍率；自旋、电荷是无量纲控制量。Kerr–Newman 模式限制有效电荷，使 `a*² + q*² ≤ 0.98²`。它是桌面视觉应用，不应用于科学计算。
+
+多体运动使用 Chipmunk2D 7.0.3 的固定子步积分与碰撞处理，并添加软化引力、短程排斥、中心约束和硬边界。碰撞光环来自实际接触冲量，但**回弹是为了保持桌面动效的艺术处理，不是黑洞并合的物理模拟**。整体漂移是额外的显示位移，不影响相对动力学。没有实现引力波或相对论并合。
+
+多透镜采用固定身份层序的 2.5D 合成，不是多个黑洞共同度规的光线追踪，也不是完整三维遮挡求解。固定层序避免近掠时突然交换前后造成闪烁。本版未移植 Bruneton 查找表或 Metal 渲染器。
 
 ## 录屏权限
 
@@ -114,11 +128,12 @@ xcode-select --install
 git clone https://github.com/zhrhaozi/singularity-desktop.git
 cd singularity-desktop
 ./scripts/test.sh
+bash scripts/test-orbital.sh
 ./build.sh
 open dist/奇点.app
 ```
 
-构建目标固定为 `arm64-apple-macosx13.0`。构建脚本不依赖第三方包，输出应用到 `dist/`，也支持 `./build.sh /absolute/output/directory`。
+构建目标固定为 `arm64-apple-macosx13.0`。Chipmunk2D 的 C 源码与许可随仓库保存在 `Vendor/`，构建无需下载第三方包；编译后静态链接到 App。输出应用到 `dist/`，也支持 `./build.sh /absolute/output/directory`。
 
 打包 DMG、ZIP 并生成 SHA-256：
 
@@ -133,6 +148,8 @@ open dist/奇点.app
 - OpenGL 3.2：渲染上游 GLSL 的适配版本。OpenGL 已被 Apple 弃用，此版本仍使用它；长期迁移目标可考虑 Metal。
 - `Behavior.swift`：颜色解析、随机漫游和边界约束。
 - `RenderCache.swift`：全精度光线几何缓存、按参数失效与资源释放。
+- `OrbitalSystem.swift` / `PhysicsBridge.c`：固定 1/120 秒子步、最多 16 次补步、软化引力、碰撞和有限范围漂移。
+- `MultiLensRenderer.swift`：共享采集的多体叠加透镜、局部几何缓存与可复用场景纹理。
 - `CodexState.swift`：Codex 状态识别、本地状态桥接与动效状态机。
 - `scripts/test.sh`：颜色合法性、速度单位、负坐标屏幕及连续 16 万步边界检查，以及 Codex 六态解析、完成保持与去重、文件失效、断联回退、迟到响应、取消与 JSON 写入回归测试。测试使用独立文件夹、注入时钟与模拟探测器，不访问真实 Codex 或用户状态文件。
 
@@ -152,6 +169,10 @@ SINGULARITY_CAPTURE_BACKEND=stream ./scripts/test-native.sh
 ```
 
 1.2.10 增加 nil 屏幕唤醒、同屏恢复、短时等待、取消恢复、截图回退后的显式重试和防振荡原生检查；使用合成 Codex 探针验证隐藏零轮询、设置窗口可见/最小化/关闭、显示恢复和睡眠约束。逻辑测试另外覆盖任务计时延续、结果不重播、失败退避、文件优先级与恢复后的过期保护，不访问个人对话。
+
+1.3.0 增加双体、三体各一小时模拟测试，覆盖可复现重置、时间步上限、速度、运动范围、近掠和真实碰撞。GPU 测试覆盖 24 组多体/风格/尺寸组合，检查缓存与直接积分、共享纹理与 CPU 上传、背景相互扭曲、透明边缘、独立光流、碰撞脉冲、运动不重建缓存和隐藏释放。真实桌面测试还验证双体、三体暂停时持续更新背景，以及隐藏后重新显示。
+
+`SINGULARITY_BENCHMARK_MULTIBODY=1 SINGULARITY_BENCHMARK_SECONDS=120 dist/奇点.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 依次测量隐藏、单体、双体、三体，每段先预热 15 秒。它固定 Codex 为长任务视觉状态并关闭真实状态探测，日志记录帧率、采集次数和缓存重建次数；进程 CPU、GPU、温度和风扇需独立采样，不能仅由帧率推断。性能测试期间临时锁定设置和鼠标交互，退出测试进程后正常启动即可恢复；测试不保存偏好，隐藏段要求零绘制、零采集，外观或模式受到干扰时立即报告失败。
 
 `SINGULARITY_BENCHMARK_BACKEND=1 dist/奇点.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 在同一进程中交替比较持续流 30 FPS 与默认自适应区域截图，动画均为 30 FPS；日志输出阶段边界，进程资源和风扇需要另行测量。改用 `SINGULARITY_BENCHMARK_ADAPTIVE=1` 可对比固定 10 FPS 与自适应截图，并记录像素比较耗时。测试不保存用户偏好。
 
@@ -178,6 +199,10 @@ swiftc -swift-version 5 CodexState.swift Tests/DesktopProbe/main.swift -o .build
 ## 致谢与许可
 
 渲染基础来自 [s0xDk/ghostty-blackhole](https://github.com/s0xDk/ghostty-blackhole)，原作者 s13k，MIT 许可。保留原始署名，详见 [第三方许可](Resources/THIRD-PARTY-LICENSE.txt)。
+
+物理引擎使用 [slembcke/Chipmunk2D](https://github.com/slembcke/Chipmunk2D)，MIT 许可；固定源码版本与提交见 [UPSTREAM.md](Vendor/Chipmunk2D/UPSTREAM.md)。许可证同时包含在安装 App 中。
+
+设计参考：[LGhassen/Singularity](https://github.com/LGhassen/Singularity) 的多黑洞视觉方向；运动与验证参考：[Dimitriuses/gravity-simulator](https://github.com/Dimitriuses/gravity-simulator) 的近掠、碰撞与轨道长跑测试，[sjtu-liao/three-body](https://github.com/sjtu-liao/three-body) 的周期轨道研究，以及 [hannorein/rebound](https://github.com/hannorein/rebound) 的数值模拟方法。后面这些项目没有作为本版运行依赖，也未复制其源码或轨道数据。REBOUND 使用 GPL，三体研究仓库未发现统一代码许可证，不能视为与 MIT 依赖等价的直接移植来源。
 
 本项目新增 macOS 桌面捕获、原生窗口与设置、拖动、漫游、分型视觉控制、自定义颜色及打包。
 
