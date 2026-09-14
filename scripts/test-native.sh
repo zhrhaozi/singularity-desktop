@@ -19,13 +19,22 @@ grep -F 'TEXTURE_SYNTHETIC_TEST_PASS shared=false' "$LOG_DIR/pass.log"
 grep -F 'SELF_TEST_PASS' "$LOG_DIR/pass.log"
 grep -E 'CAPTURE_TEST_(PASS|SKIPPED)' "$LOG_DIR/pass.log"
 grep -F 'CAPTURE_POLICY_TEST_PASS' "$LOG_DIR/pass.log"
+grep -F 'CAPTURE_PIXEL_TEST_PASS' "$LOG_DIR/pass.log"
 if grep -Fq 'CAPTURE_TEST_PASS' "$LOG_DIR/pass.log"; then
   grep -F 'CAPTURE_RECOVERY_TEST_PASS' "$LOG_DIR/pass.log"
+  grep -F 'CAPTURE_START_RETARGET_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_REFRESH_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'CAPTURE_RENDER_TEST_PASS' "$LOG_DIR/pass.log"
   grep -E 'TEXTURE_(EQUIVALENCE_TEST_PASS|ZERO_COPY_SKIPPED)' "$LOG_DIR/pass.log"
   grep -F 'RENDER_SCHEDULING_TEST_PASS' "$LOG_DIR/pass.log"
   grep -F 'IDLE_RESOURCE_TEST_PASS' "$LOG_DIR/pass.log"
+  if [[ "$(sw_vers -productVersion)" != 13.0* ]]; then
+    grep -F 'CAPTURE_REGION_TEST_PASS' "$LOG_DIR/pass.log"
+  fi
+  if [[ "$(sw_vers -productVersion)" != 13.* && "${SINGULARITY_CAPTURE_BACKEND:-}" != stream ]]; then
+    grep -F 'CAPTURE_SNAPSHOT_TEST_PASS' "$LOG_DIR/pass.log"
+    grep -F 'CAPTURE_ADAPTIVE_TEST_PASS' "$LOG_DIR/pass.log"
+  fi
 fi
 if "$APP/Contents/MacOS/Singularity" --pet-only --self-test --self-test-fail > "$LOG_DIR/fail.log" 2>&1; then
   echo "FAIL: release self-test accepted an intentional failure" >&2

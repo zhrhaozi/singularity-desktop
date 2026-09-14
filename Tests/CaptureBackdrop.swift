@@ -20,6 +20,7 @@ app.setActivationPolicy(.accessory)
 let parent=getppid()
 NSLog("CAPTURE_BACKDROP_STARTED pid=%d parent=%d",getpid(),parent)
 var windows=[NSWindow]()
+var animated=true
 for screen in NSScreen.screens {
     let window=NSWindow(contentRect:screen.frame,styleMask:.borderless,backing:.buffered,defer:false)
     window.level=NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue-1)
@@ -29,8 +30,26 @@ for screen in NSScreen.screens {
     window.orderFrontRegardless()
     windows.append(window)
 }
+FileHandle.standardInput.readabilityHandler={input in
+    let data=input.availableData
+    guard !data.isEmpty else {input.readabilityHandler=nil;return}
+    DispatchQueue.main.async {
+        for command in data {
+            NSLog("CAPTURE_BACKDROP_CONTROL byte=%d",Int(command))
+            if command==112 {animated=false}
+            if command==114 {animated=true}
+            if command==115 {
+                for window in windows {
+                    let view=window.contentView as! BackdropView
+                    view.phase+=1;view.needsDisplay=true
+                }
+            }
+        }
+    }
+}
 let timer=Timer.scheduledTimer(withTimeInterval:0.4,repeats:true){_ in
     guard getppid()==parent else{exit(0)}
+    guard animated else{return}
     for window in windows {
         let view=window.contentView as! BackdropView
         view.phase+=1;view.needsDisplay=true

@@ -21,6 +21,13 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var customColor = UserDefaults.standard.bool(forKey:"customColor") {didSet{save()}}
     @Published var colorHex = UserDefaults.standard.string(forKey:"colorHex") ?? "#FFAA55" {didSet{save()}}
     @Published var codexAuto = UserDefaults.standard.object(forKey:"codexAuto") as? Bool ?? true { didSet { save(); appDelegate?.codexBridge?.restartIfNeeded() } }
+    @Published var backgroundFPS = CaptureCadence.normalized(UserDefaults.standard.integer(forKey:"backgroundFPS")) {
+        didSet {
+            guard !CommandLine.arguments.contains("--self-test") else{return}
+            UserDefaults.standard.set(backgroundFPS,forKey:"backgroundFPS")
+            appDelegate?.checkScreen()
+        }
+    }
     @Published var codexState: CodexActivityState = .idle
     @Published var codexSource = "等待 Codex 桌面状态"
     @Published var codexDetail = ""
@@ -43,7 +50,7 @@ final class Model: ObservableObject, CodexStateModel {
         if changed && (next == .complete || next == .error) { codexPulse = 1.0 }
     }
     func setCodexState(_ next:CodexActivityState, source:String, detail:String="") { setCodexState(next, source, detail) }
-    func reset() { size=440;lens=13;speed=0.6;brightness=2.2;tilt=1.48;roll=0.18;style=0;kind=0;spin=0.7;charge=0.5;mass=1;wander=false;travelSpeed=35;customColor=false;colorHex="#FFAA55";codexAuto=true;setCodexState(.idle, source:"等待 Codex 桌面状态");appDelegate?.centerPet() }
+    func reset() { size=440;lens=13;speed=0.6;brightness=2.2;tilt=1.48;roll=0.18;style=0;kind=0;spin=0.7;charge=0.5;mass=1;wander=false;travelSpeed=35;customColor=false;colorHex="#FFAA55";codexAuto=true;backgroundFPS=10;setCodexState(.idle, source:"等待 Codex 桌面状态");appDelegate?.centerPet() }
 }
 let model=Model()
 var appDelegate: AppDelegate?
@@ -66,9 +73,17 @@ struct CaptureRetryBudget {
 }
 
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
+    struct Snapshot {
+        let buffer: CVPixelBuffer
+        let rect: CGRect
+    }
     var stream: SCStream?
     let lock=NSLock()
     var frame: CVPixelBuffer?
+    private var frameRect=CGRect.zero
+    private var frameDisplayRect=CGRect.zero
+    private var frameDisplayBounds=CGRect.zero
+    private var frameUsesRegion=false
     var screenRect=CGRect.zero
     var displayID: CGDirectDisplayID=0
     var busy=false
@@ -85,6 +100,43 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var retryTask:Task<Void,Never>?
     private var firstFrameTask:Task<Void,Never>?
     private var retryBudget=CaptureRetryBudget()
+    private var regionAvailable=true
+    private var desiredRegion=CGRect.zero
+    private var pendingRegion:CGRect?
+    private var regionUpdateID:UUID?
+    private var captureScale:CGFloat=1
+    private var wasDragging=false
+    private var screenshotTask:Task<Void,Never>?
+    private var screenshotWait:Task<Void,Error>?
+    private var screenshotDeadline:Task<Void,Never>?
+    private var screenshotAvailable=true
+    private(set) var screenshotRequests=0
+    private(set) var unchangedScreenshots=0
+    private(set) var comparisonMilliseconds=[Double]()
+    private var adaptiveCadence=AdaptiveCaptureCadence()
+    var adaptiveSampling=true
+    var selfTestScreenshotDelay:UInt64=0
+    var selfTestStreamStartDelay:UInt64=0
+    private(set) var activeID:UUID?
+    private(set) var appliedFramesPerSecond=0
+    private var desiredFramesPerSecond=0
+    private(set) var configurationUpdates=0
+    var forceFullDisplay=ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_FULL_DISPLAY"]=="1"
+    var forceStream=ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_BACKEND"]=="stream"
+    var benchmarkWindowFilter=false
+    var benchmarkNominalResolution=false
+    var framesPerSecond:Int?
+    private var usesScreenshots:Bool {
+        if #available(macOS 14.0, *) {return screenshotAvailable && !forceStream}
+        return false
+    }
+    private var preferredFramesPerSecond:Int {
+        CaptureCadence.rate(preferred:framesPerSecond ?? model.backgroundFPS,dragging:appDelegate?.view.dragging ?? false)
+    }
+    private var usesRegion:Bool {
+        if #available(macOS 13.1, *) {return regionAvailable && !forceFullDisplay}
+        return false
+    }
     var wantsCapture:Bool {requestedScreen != nil}
     var retryPending:Bool {retryTask != nil}
 
@@ -104,7 +156,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     static func isRecoverable(_ error:Error)->Bool {
         let e=error as NSError
-        if e.domain == "Singularity.Capture" {return (1...3).contains(e.code)}
+        if e.domain == "Singularity.Capture" {return (1...4).contains(e.code)}
         guard e.domain == SCStreamErrorDomain else{return false}
         switch SCStreamError.Code(rawValue:e.code) {
         case .failedToStart, .failedApplicationConnectionInvalid,
@@ -119,13 +171,21 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private func captureError(_ code:Int,_ description:String)->NSError {
         NSError(domain:"Singularity.Capture",code:code,userInfo:[NSLocalizedDescriptionKey:description])
     }
-    private func acceptFrames(from source:SCStream?) {
+    private func acceptFrames(from source:SCStream?,screen:NSScreen?=nil,region:Bool=false) {
         lock.lock();defer{lock.unlock()}
-        frame=nil;frameStream=source
+        frame=nil;frameRect = .zero;frameStream=source;frameUsesRegion=region
+        if let screen {
+            frameDisplayRect=screen.frame
+            let id=(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+            frameDisplayBounds=CGDisplayBounds(id)
+        }
     }
     @MainActor private func cancelPending() {
         retryTask?.cancel();retryTask=nil
         firstFrameTask?.cancel();firstFrameTask=nil
+        screenshotDeadline?.cancel();screenshotDeadline=nil
+        screenshotWait?.cancel();screenshotWait=nil
+        pendingRegion=nil;regionUpdateID=nil
     }
     @MainActor func start(screen:NSScreen?,requestPermission:Bool=true) async {
         cancelPending();retryBudget.reset()
@@ -150,9 +210,59 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     @MainActor func retarget(screen:NSScreen) async {
         guard wantsCapture else{return}
         let key=NSDeviceDescriptionKey("NSScreenNumber")
-        guard requestedDisplayID != screen.deviceDescription[key] as? NSNumber ||
-                requestedRect != screen.frame else{return}
-        await start(screen:screen,requestPermission:false)
+        if requestedDisplayID != screen.deviceDescription[key] as? NSNumber || requestedRect != screen.frame {
+            await start(screen:screen,requestPermission:false)
+            return
+        }
+        guard activeID != nil,let pet=appDelegate?.pet else{return}
+        if screenshotTask==nil {
+            guard let current=stream,startedStream === current else{return}
+        }
+        let dragging=appDelegate?.view.dragging ?? false
+        let region=dragging || !usesRegion ? screen.frame :
+            CaptureRegion.region(for:pet.frame,on:screen.frame,retaining:wasDragging ? nil:desiredRegion)
+        wasDragging=dragging
+        let fps=preferredFramesPerSecond
+        guard region != desiredRegion || fps != desiredFramesPerSecond else{return}
+        desiredRegion=region;desiredFramesPerSecond=fps
+        if screenshotTask != nil {
+            configurationUpdates+=1;adaptiveCadence.reset()
+            screenshotWait?.cancel()
+            return
+        }
+        guard let current=stream,startedStream === current else{return}
+        pendingRegion=region
+        guard regionUpdateID==nil else{return}
+        let updateID=UUID(),serial=requestSerial
+        regionUpdateID=updateID
+        defer {if regionUpdateID==updateID {regionUpdateID=nil}}
+        // Coalesce moves while ScreenCaptureKit applies a previous crop. Each frame
+        // carries its own screen rect, so queued frames never use a newer crop origin.
+        while regionUpdateID==updateID,let next=pendingRegion {
+            pendingRegion=nil
+            let nextFPS=desiredFramesPerSecond
+            do {try await current.updateConfiguration(configuration(region:next,screen:screen))}
+            catch {
+                guard regionUpdateID==updateID,serial==requestSerial,stream === current else{return}
+                regionAvailable=false
+                record("CAPTURE_REGION_FALLBACK configuration")
+                await start(screen:screen,requestPermission:false)
+                return
+            }
+            guard regionUpdateID==updateID,serial==requestSerial,stream === current else{return}
+            screenRect=next;appliedFramesPerSecond=nextFPS;configurationUpdates+=1
+        }
+    }
+    @MainActor private func configuration(region:CGRect,screen:NSScreen)->SCStreamConfiguration {
+        let config=SCStreamConfiguration()
+        if #available(macOS 14.0, *),benchmarkNominalResolution {config.captureResolution = .nominal}
+        config.sourceRect=CaptureRegion.sourceRect(region,on:screen.frame)
+        config.width=max(1,Int((region.width*captureScale).rounded(.up)))
+        config.height=max(1,Int((region.height*captureScale).rounded(.up)))
+        config.pixelFormat=kCVPixelFormatType_32BGRA
+        config.minimumFrameInterval=CMTime(value:1,timescale:CMTimeScale(preferredFramesPerSecond))
+        config.queueDepth=3;config.showsCursor=false;config.capturesAudio=false
+        return config
     }
     @MainActor private func reconcile() async {
         guard !busy else {return}
@@ -165,7 +275,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
     @MainActor private func transition(to screen:NSScreen?,serial:UInt64) async {
-        let old=stream;stream=nil;startedStream=nil;acceptFrames(from:nil)
+        let old=stream;stream=nil;startedStream=nil;activeID=nil
+        screenshotWait?.cancel();screenshotWait=nil;adaptiveCadence.reset()
+        screenshotTask?.cancel();screenshotTask=nil;acceptFrames(from:nil)
         model.capturing=false
         if let old {try? await old.stopCapture()}
         guard serial == requestSerial else {return}
@@ -193,29 +305,45 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             // before WindowServer's on-screen window list has caught up.
             let own=content.applications.filter{$0.processID == ProcessInfo.processInfo.processIdentifier}
             guard !own.isEmpty else {throw captureError(2,"应用窗口尚未就绪")}
-            let filter=SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
-            let config=SCStreamConfiguration()
-            config.width=display.width;config.height=display.height
-            config.pixelFormat=kCVPixelFormatType_32BGRA
-            config.minimumFrameInterval=CMTime(value:1,timescale:30)
-            config.queueDepth=3;config.showsCursor=false;config.capturesAudio=false
+            let filter=benchmarkWindowFilter ?
+                SCContentFilter(display:display,excludingWindows:content.windows.filter{$0.owningApplication?.processID==getpid()}) :
+                SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
+            captureScale=screen.backingScaleFactor
+            if #available(macOS 14.0, *) {captureScale=CGFloat(filter.pointPixelScale)}
+            if !captureScale.isFinite || captureScale<=0 {captureScale=max(1,screen.backingScaleFactor)}
+            let dragging=appDelegate?.view.dragging ?? false
+            let region=usesRegion && !dragging ? CaptureRegion.region(for:appDelegate?.pet.frame ?? screen.frame,on:screen.frame):screen.frame
+            desiredRegion=region
+            desiredFramesPerSecond=preferredFramesPerSecond
+            wasDragging=dragging
+            let config=configuration(region:region,screen:screen)
+            activeID=UUID()
+            screenRect=region;displayID=id
+            if #available(macOS 14.0, *),usesScreenshots {
+                startScreenshots(filter:filter,screen:screen,serial:serial)
+                record("CAPTURE_STARTED backend=screenshot display=\(id) excludedApps=\(own.count) pixels=\(config.width)x\(config.height) region=\(usesRegion)")
+                watchForFirstFrame(serial:serial)
+                return
+            }
             let next=SCStream(filter:filter,configuration:config,delegate:self)
             try next.addStreamOutput(self,type:.screen,sampleHandlerQueue:DispatchQueue(label:"singularity.capture"))
-            screenRect=screen.frame;displayID=id;stream=next
-            acceptFrames(from:next)
+            screenRect=region;displayID=id;stream=next
+            acceptFrames(from:next,screen:screen,region:usesRegion)
             try await next.startCapture()
+            if CommandLine.arguments.contains("--self-test"),selfTestStreamStartDelay>0 {
+                try await Task.sleep(nanoseconds:selfTestStreamStartDelay)
+            }
             guard serial == requestSerial,stream === next else {return}
             startedStream=next
-            model.captureState="等待桌面画面…"
-            if latest() != nil {receivedFirstFrame(from:next)}
-            else {
-                firstFrameTask=Task{@MainActor [weak self] in
-                    do {try await Task.sleep(nanoseconds:8_000_000_000)} catch {return}
-                    guard let self,self.stream === next,serial == self.requestSerial else{return}
-                    self.failed(self.captureError(3,"连接后未收到桌面画面"),serial:serial)
-                }
+            appliedFramesPerSecond=Int(config.minimumFrameInterval.timescale)
+            await retarget(screen:screen)
+            guard serial == requestSerial,stream === next else {return}
+            if !model.capturing {
+                model.captureState="等待桌面画面…"
+                if latest() != nil {receivedFirstFrame(from:next)}
+                else {watchForFirstFrame(serial:serial)}
             }
-            record("CAPTURE_STARTED display=\(id) excludedApps=\(own.count)")
+            record("CAPTURE_STARTED backend=stream display=\(id) excludedApps=\(own.count) pixels=\(config.width)x\(config.height) region=\(usesRegion)")
         } catch {
             guard serial == requestSerial else {return}
             // The delegate may already have handled a failure during startCapture().
@@ -223,17 +351,127 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             failed(error,serial:serial)
         }
     }
+    @MainActor private func watchForFirstFrame(serial:UInt64) {
+        firstFrameTask=Task{@MainActor [weak self] in
+            do {try await Task.sleep(nanoseconds:8_000_000_000)} catch {return}
+            guard let self,self.activeID != nil,serial==self.requestSerial,!model.capturing else{return}
+            if self.screenshotTask != nil {self.screenshotAvailable=false}
+            self.failed(self.captureError(3,"连接后未收到桌面画面"),serial:serial)
+        }
+    }
+    @available(macOS 14.0, *)
+    @MainActor private func startScreenshots(filter:SCContentFilter,screen:NSScreen,serial:UInt64) {
+        let sourceID=activeID
+        screenshotTask=Task{@MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self,self.activeID==sourceID,self.requestSerial==serial else{return}
+                let began=ProcessInfo.processInfo.systemUptime
+                let region=self.desiredRegion
+                let revision=self.configurationUpdates
+                let config=self.configuration(region:region,screen:screen)
+                self.screenshotRequests+=1
+                self.screenshotDeadline=Task{@MainActor [weak self] in
+                    do {try await Task.sleep(nanoseconds:3_000_000_000)} catch {return}
+                    guard let self,self.activeID==sourceID,self.requestSerial==serial else{return}
+                    self.screenshotAvailable=false
+                    self.record("CAPTURE_SCREENSHOT_FALLBACK timeout")
+                    self.failed(self.captureError(4,"桌面快照请求超时"),serial:serial)
+                }
+                do {
+                    let sample=try await SCScreenshotManager.captureSampleBuffer(contentFilter:filter,configuration:config)
+                    if CommandLine.arguments.contains("--self-test"),self.selfTestScreenshotDelay>0 {
+                        try await Task.sleep(nanoseconds:self.selfTestScreenshotDelay)
+                    }
+                    guard !Task.isCancelled,self.activeID==sourceID,self.requestSerial==serial else{return}
+                    self.screenshotDeadline?.cancel();self.screenshotDeadline=nil
+                    guard let image=CMSampleBufferGetImageBuffer(sample) else {
+                        throw self.captureError(4,"桌面快照没有有效图像")
+                    }
+                    let next=Snapshot(buffer:image,rect:region)
+                    let preferred=self.preferredFramesPerSecond
+                    let adaptive=self.adaptiveSampling && preferred==10
+                    let comparisonStart=ProcessInfo.processInfo.systemUptime
+                    let unchanged=adaptive && self.latestSnapshot().map{Self.samePixels($0,next)}==true
+                    if adaptive,!unchanged,CommandLine.arguments.contains("--self-test"),
+                       ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_DIAGNOSTICS"]=="1" {
+                        log("CAPTURE_PIXELS_CHANGED uptime=\(ProcessInfo.processInfo.systemUptime) rect=\(region)")
+                    }
+                    if adaptive,CommandLine.arguments.contains("--self-test-performance"),self.comparisonMilliseconds.count<10_000 {
+                        self.comparisonMilliseconds.append((ProcessInfo.processInfo.systemUptime-comparisonStart)*1000)
+                    }
+                    if unchanged {self.unchangedScreenshots+=1}
+                    else {self.acceptSnapshot(next)}
+                    self.screenRect=region
+                    let fps=adaptive ? self.adaptiveCadence.rate(preferred:preferred,dragging:false,
+                        changed:!unchanged,now:ProcessInfo.processInfo.systemUptime):preferred
+                    self.appliedFramesPerSecond=fps
+                    self.receivedFirstFrame(serial:serial)
+                    // A move or preference change during capture must not wait at idle cadence.
+                    if self.configurationUpdates != revision {continue}
+                    let delay=max(0,1.0/Double(fps)-(ProcessInfo.processInfo.systemUptime-began))
+                    let wait=Task {try await Task.sleep(nanoseconds:UInt64(delay*1_000_000_000))}
+                    self.screenshotWait=wait
+                    try? await wait.value
+                    guard !Task.isCancelled,self.activeID==sourceID,self.requestSerial==serial else{return}
+                    self.screenshotWait=nil
+                } catch {
+                    guard !Task.isCancelled,self.activeID==sourceID,self.requestSerial==serial else{return}
+                    self.screenshotDeadline?.cancel();self.screenshotDeadline=nil
+                    // Unsupported snapshot paths fall back once; permission/user-stop
+                    // errors still obey the same terminal policy as the stream backend.
+                    if (error as NSError).domain=="Singularity.Capture" || Self.isRecoverable(error) {
+                        self.screenshotAvailable=false
+                        self.record("CAPTURE_SCREENSHOT_FALLBACK")
+                    }
+                    self.failed(error,serial:serial)
+                    return
+                }
+            }
+        }
+    }
+    static func samePixels(_ a:Snapshot,_ b:Snapshot)->Bool {
+        guard a.rect==b.rect,
+              CVPixelBufferGetPixelFormatType(a.buffer)==kCVPixelFormatType_32BGRA,
+              CVPixelBufferGetPixelFormatType(b.buffer)==kCVPixelFormatType_32BGRA,
+              CVPixelBufferGetWidth(a.buffer)==CVPixelBufferGetWidth(b.buffer),
+              CVPixelBufferGetHeight(a.buffer)==CVPixelBufferGetHeight(b.buffer) else{return false}
+        if a.buffer === b.buffer {return true}
+        guard CVPixelBufferLockBaseAddress(a.buffer,.readOnly)==kCVReturnSuccess else{return false}
+        defer {CVPixelBufferUnlockBaseAddress(a.buffer,.readOnly)}
+        guard CVPixelBufferLockBaseAddress(b.buffer,.readOnly)==kCVReturnSuccess else{return false}
+        defer {CVPixelBufferUnlockBaseAddress(b.buffer,.readOnly)}
+        guard let lhs=CVPixelBufferGetBaseAddress(a.buffer),let rhs=CVPixelBufferGetBaseAddress(b.buffer) else{return false}
+        let bytes=CVPixelBufferGetWidth(a.buffer)*4
+        let leftStride=CVPixelBufferGetBytesPerRow(a.buffer),rightStride=CVPixelBufferGetBytesPerRow(b.buffer)
+        guard bytes>0,leftStride>=bytes,rightStride>=bytes else{return false}
+        // Padding is not image content and may change even on an unchanged desktop.
+        for row in 0..<CVPixelBufferGetHeight(a.buffer) {
+            if memcmp(lhs.advanced(by:row*leftStride),rhs.advanced(by:row*rightStride),bytes) != 0 {return false}
+        }
+        return true
+    }
+    private func acceptSnapshot(_ snapshot:Snapshot) {
+        lock.lock();defer{lock.unlock()}
+        frame=snapshot.buffer;frameRect=snapshot.rect
+    }
     @MainActor private func receivedFirstFrame(from source:SCStream) {
         guard stream === source,startedStream === source,!model.capturing else{return}
+        receivedFirstFrame(serial:requestSerial)
+    }
+    @MainActor private func receivedFirstFrame(serial:UInt64) {
+        guard serial==requestSerial,activeID != nil,!model.capturing else{return}
         firstFrameTask?.cancel();firstFrameTask=nil
         model.capturing=true;model.captureState="桌面透镜已连接";model.error=""
         retryBudget.connected(at:ProcessInfo.processInfo.systemUptime)
         record("CAPTURE_FIRST_FRAME display=\(displayID)")
+        appDelegate?.checkScreen()
     }
     @MainActor private func failed(_ error:Error,serial:UInt64) {
         guard serial == requestSerial else{return}
         let retired=stream
-        stream=nil;startedStream=nil;acceptFrames(from:nil);cancelPending()
+        stream=nil;startedStream=nil;activeID=nil
+        screenshotTask?.cancel();screenshotTask=nil
+        acceptFrames(from:nil);cancelPending()
         model.capturing=false;requestPermission=false
         let e=error as NSError
         record("CAPTURE_FAILURE domain=\(e.domain) code=\(e.code) display=\(displayID)")
@@ -267,16 +505,54 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard type == .screen,buffer.isValid, let image=CMSampleBufferGetImageBuffer(buffer) else{return}
         guard let attachments=CMSampleBufferGetSampleAttachmentsArray(buffer,createIfNecessary:false) as? [[SCStreamFrameInfo:Any]],let raw=attachments.first?[.status] as? Int,raw==SCFrameStatus.complete.rawValue else{return}
         lock.lock()
-        let first=stream === frameStream && frame == nil
-        if stream === frameStream {frame=image}
+        guard stream === frameStream else {lock.unlock();return}
+        var rect=frameDisplayRect
+        if frameUsesRegion {
+            var reported:CGRect?
+            if #available(macOS 13.1, *),
+               let dictionary=attachments.first?[.screenRect] as? [String:Any] {
+                reported=CGRect(dictionaryRepresentation:dictionary as CFDictionary)
+            }
+            guard let reported,let mapped=CaptureRegion.globalRect(reported,on:frameDisplayRect,displayBounds:frameDisplayBounds) else {
+                lock.unlock()
+                Task{@MainActor in
+                    guard self.stream === stream,self.regionAvailable,let screen=self.requestedScreen else{return}
+                    self.regionAvailable=false
+                    self.record("CAPTURE_REGION_FALLBACK metadata")
+                    await self.start(screen:screen,requestPermission:false)
+                }
+                return
+            }
+            rect=mapped
+        }
+        let first=frame == nil
+        frame=image;frameRect=rect
         lock.unlock()
-        if first {Task{@MainActor in self.receivedFirstFrame(from:stream)}}
+        if first {
+            if ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_DIAGNOSTICS"]=="1" {
+                log("CAPTURE_FRAME_METADATA pixels=\(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image)) info=\(attachments)")
+            }
+            Task{@MainActor in self.receivedFirstFrame(from:stream)}
+        }
     }
     func stream(_ stream:SCStream,didStopWithError error:Error) { DispatchQueue.main.async {
         guard stream === self.stream else {return}
         self.failed(error,serial:self.requestSerial)
     } }
     func latest()->CVPixelBuffer? {lock.lock();defer{lock.unlock()};return frame}
+    func latestSnapshot()->Snapshot? {
+        lock.lock();defer{lock.unlock()}
+        return frame.map{Snapshot(buffer:$0,rect:frameRect)}
+    }
+    @MainActor func interruptForSelfTest(_ error:NSError,sourceID:UUID?) {
+        guard CommandLine.arguments.contains("--self-test"),let sourceID,sourceID==activeID else{return}
+        failed(error,serial:requestSerial)
+    }
+    @MainActor func supplyBenchmarkSnapshot(_ snapshot:Snapshot) {
+        guard CommandLine.arguments.contains("--self-test-performance") else{return}
+        acceptSnapshot(snapshot)
+        if !model.capturing {model.capturing=true}
+    }
 }
 
 final class PetWindow:NSPanel {
@@ -342,6 +618,7 @@ final class PetView:NSOpenGLView {
     private let geometryCachingEnabled=ProcessInfo.processInfo.environment["SINGULARITY_DISABLE_GEOMETRY_CACHE"] != "1"
     var benchmarkDirectGeometry=false
     private var renderedWindowFrame=CGRect.zero
+    private var requestedCaptureFrame=CGRect.zero
     private var renderedCapture=false
     private var uniforms=UniformLocations()
     var dragStart=NSPoint.zero, originStart=NSPoint.zero
@@ -496,6 +773,10 @@ final class PetView:NSOpenGLView {
             let ignores=hypot(point.x-bounds.midX,point.y-bounds.midY)>bounds.width*0.27
             if w.ignoresMouseEvents != ignores {w.ignoresMouseEvents=ignores}
         }
+        if w.frame != requestedCaptureFrame {
+            requestedCaptureFrame=w.frame
+            appDelegate?.checkScreen()
+        }
         if !model.paused || needsDisplay || capture.latest() !== uploaded ||
             w.frame != renderedWindowFrame || model.capturing != renderedCapture {needsDisplay=true}
     }
@@ -542,7 +823,7 @@ final class PetView:NSOpenGLView {
         glPixelStorei(GLenum(GL_UNPACK_ROW_LENGTH),0)
         uploaded=buffer;copiedFrames+=1
     }
-    func renderFrame(width:GLsizei,height:GLsizei,useCapture:Bool,captureBuffer:CVPixelBuffer?=nil,forceCPUUpload:Bool=false,forceUncachedGeometry:Bool=false) {
+    func renderFrame(width:GLsizei,height:GLsizei,useCapture:Bool,captureBuffer:CVPixelBuffer?=nil,captureSourceRect:CGRect?=nil,forceCPUUpload:Bool=false,forceUncachedGeometry:Bool=false) {
         glBindVertexArray(vao)
         let values:[(String,Float)]=[
             ("LENS_DEPTH",Float(model.lens)),("inclination",Float(model.tilt)),
@@ -557,7 +838,9 @@ final class PetView:NSOpenGLView {
         glViewport(0,0,width,height);glClearColor(0,0,0,0);glClear(GLbitfield(GL_COLOR_BUFFER_BIT))
         glUseProgram(program);glBindVertexArray(vao);glActiveTexture(GLenum(GL_TEXTURE0));glBindTexture(GLenum(GL_TEXTURE_2D),textureID)
         set1i(uniforms.useGeometryCache,cached ? 1:0)
-        if useCapture,let buffer=captureBuffer ?? capture.latest() {bindDesktop(buffer,forceCPUUpload:forceCPUUpload)}
+        let snapshot=useCapture && captureBuffer==nil ? capture.latestSnapshot():nil
+        let sourceRect=captureSourceRect ?? snapshot?.rect ?? capture.screenRect
+        if useCapture,let buffer=captureBuffer ?? snapshot?.buffer {bindDesktop(buffer,forceCPUUpload:forceCPUUpload)}
         else if useCapture {
             uploaded=nil;desktopSurface=nil;usingDesktopSurface=false
             if let cache=desktopCache {CVOpenGLTextureCacheFlush(cache,0)}
@@ -576,7 +859,7 @@ final class PetView:NSOpenGLView {
         set3f(uniforms.customRGB,Float(rgb.r),Float(rgb.g),Float(rgb.b))
         set1i(uniforms.useCustomColor,model.customColor ? 1:0)
         set1i(uniforms.style,GLint(model.style));set1i(uniforms.hasCapture,useCapture && uploaded != nil && model.capturing ? 1:0)
-        if let w=window,capture.screenRect.width>0 {let s=capture.screenRect;set4f(uniforms.captureRect,Float((w.frame.minX-s.minX)/s.width),Float((s.maxY-w.frame.maxY)/s.height),Float(w.frame.width/s.width),Float(w.frame.height/s.height))}
+        if let w=window,sourceRect.width>0 {let s=sourceRect;set4f(uniforms.captureRect,Float((w.frame.minX-s.minX)/s.width),Float((s.maxY-w.frame.maxY)/s.height),Float(w.frame.width/s.width),Float(w.frame.height/s.height))}
         glDrawArrays(GLenum(GL_TRIANGLES),0,3)
     }
     override func viewDidChangeBackingProperties() {
@@ -585,6 +868,7 @@ final class PetView:NSOpenGLView {
     override func mouseDown(with event:NSEvent) {
         if event.clickCount==2 {appDelegate?.showSettings();return}
         log("DRAG_BEGIN");dragging=true;dragStart=NSEvent.mouseLocation;originStart=window!.frame.origin
+        appDelegate?.checkScreen()
     }
     override func mouseDragged(with event:NSEvent) {let p=NSEvent.mouseLocation;window?.setFrameOrigin(NSPoint(x:originStart.x+p.x-dragStart.x,y:originStart.y+p.y-dragStart.y))}
     override func mouseUp(with event:NSEvent) {dragging=false;log("DRAG_END x=\(window!.frame.minX) y=\(window!.frame.minY)");appDelegate?.savePosition();appDelegate?.screenParametersChanged()}
@@ -614,6 +898,11 @@ struct SettingsView:View {
                     Button("打开屏幕录制设置"){NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)}
                     Button("在访达中显示当前应用"){NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
                 }.font(.system(size:11))}}.padding(14).background(Color.white.opacity(0.045),in:RoundedRectangle(cornerRadius:10))
+            Picker("桌面背景刷新",selection:$state.backgroundFPS) {
+                Text("自动 · 2–10 FPS").tag(10)
+                Text("均衡 · 15 FPS").tag(15)
+                Text("流畅 · 30 FPS").tag(30)
+            }.pickerStyle(.segmented)
             VStack(alignment:.leading,spacing:11){
                 HStack{Text("Codex 状态联动").font(.headline);Spacer();Text(state.codexState.label).font(.system(size:11,design:.monospaced)).foregroundStyle(accent)}
                 Toggle("自动检测 Codex 桌面状态",isOn:$state.codexAuto).tint(accent)
@@ -652,7 +941,7 @@ struct SettingsView:View {
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
             HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
-            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.8")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
+            HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.9")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }
 }
@@ -726,7 +1015,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){settings?.makeKeyAndOrderFront(nil);NSApp.activate(ignoringOtherApps:true)}
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.8",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.2.9",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){savePosition()}
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){

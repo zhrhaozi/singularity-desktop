@@ -49,6 +49,52 @@ expect(PetPlacement.recoveredOrigin(for:bottomRight,screens:[reduced])==CGPoint(
 expect(PetPlacement.recoveredOrigin(for:bottomRight,screens:[])==bottomRight.origin,"temporary empty screen list preserves saved location")
 print("PASS: colors, 160000 roaming steps, edge placement, Dock changes, screen removal/reorder/resizing")
 
+let cropPet = CGRect(x:500,y:400,width:292,height:292)
+let crop = CaptureRegion.region(for:cropPet,on:full)
+expect(crop==CGRect(x:436,y:336,width:420,height:420),"crop includes moving guard band")
+expect(CaptureRegion.region(for:cropPet.offsetBy(dx:10,dy:10),on:full,retaining:crop)==crop,"small motion reuses capture")
+expect(CaptureRegion.region(for:cropPet.offsetBy(dx:80,dy:0),on:full,retaining:crop) != crop,"motion refreshes before leaving capture")
+expect(CaptureRegion.region(for:cropPet,on:full,retaining:full)==crop,"oversized capture shrinks after dragging")
+for s in [full,secondary.frame] {
+    let displayBounds=CGRect(x:s.minX,y:full.maxY-s.maxY,width:s.width,height:s.height)
+    for x in stride(from:s.minX-140,through:s.maxX-140,by:71) {
+        for y in stride(from:s.minY-140,through:s.maxY-140,by:67) {
+            let pet=CGRect(x:x,y:y,width:280,height:280)
+            let region=CaptureRegion.region(for:pet,on:s)
+            expect(s.contains(region),"region remains inside screen")
+            let required=pet.intersection(s)
+            expect(required.isEmpty || region.contains(required),"region covers visible sampling area")
+            let source=CaptureRegion.sourceRect(region,on:s)
+            let reported=source.offsetBy(dx:displayBounds.minX,dy:displayBounds.minY)
+            expect(CaptureRegion.globalRect(reported,on:s,displayBounds:displayBounds)==region,"frame coordinates round trip across screens")
+        }
+    }
+}
+expect(CaptureRegion.globalRect(CGRect(x:0,y:0,width:0,height:10),on:full,displayBounds:full)==nil,"reject empty metadata")
+expect(CaptureRegion.globalRect(CGRect(x:10000,y:0,width:10,height:10),on:full,displayBounds:full)==nil,"reject offscreen metadata")
+print("PASS: capture regions, motion guard bands, shrink, edge overflow and multi-screen coordinates")
+for fps in [10,15,30] {
+    expect(CaptureCadence.rate(preferred:fps,dragging:false)==fps,"saved background cadence")
+    expect(CaptureCadence.rate(preferred:fps,dragging:true)==30,"drag uses full background cadence")
+}
+for fps in [-1,0,1,60,Int.max] {
+    expect(CaptureCadence.normalized(fps)==10,"invalid background cadence uses bounded default")
+}
+print("PASS: background cadence choices, invalid preferences and drag override")
+var adaptive=AdaptiveCaptureCadence()
+expect(adaptive.rate(preferred:10,dragging:false,changed:false,now:0)==10,"initial capture starts promptly")
+expect(adaptive.rate(preferred:10,dragging:false,changed:false,now:0.74)==10,"brief stillness retains cadence")
+expect(adaptive.rate(preferred:10,dragging:false,changed:false,now:0.75)==2,"stable background keeps bounded live detection")
+expect(adaptive.rate(preferred:10,dragging:false,changed:true,now:1)==10,"new pixels immediately restore cadence")
+expect(adaptive.rate(preferred:10,dragging:true,changed:false,now:10)==30,"drag bypasses idle cadence")
+expect(adaptive.rate(preferred:10,dragging:false,changed:false,now:10.1)==10,"release retains responsive cadence")
+for fps in [15,30] {
+    expect(adaptive.rate(preferred:fps,dragging:false,changed:false,now:20)==fps,"explicit cadence never idles")
+}
+adaptive.reset()
+expect(adaptive.rate(preferred:10,dragging:false,changed:false,now:30)==10,"retarget resets adaptive state")
+print("PASS: adaptive idle, change, drag, fixed-rate and reset policies")
+
 // Codex tests: injected clocks, local fixtures and a fake probe only.
 // Never start the desktop app or access the user's state file / debug endpoint.
 var codexChecks = 0

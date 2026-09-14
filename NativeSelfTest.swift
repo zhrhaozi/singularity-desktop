@@ -39,6 +39,7 @@ enum NativeSelfTest {
         require(linked==1,"GL link status")
         renderChecks(app.view)
         recoveryPolicyChecks()
+        snapshotPixelChecks()
         if CommandLine.arguments.contains("--self-test-render-only") {
             log("SELF_TEST_PASS generated-texture renderer-only")
             NSApp.terminate(nil)
@@ -51,21 +52,20 @@ enum NativeSelfTest {
                 try? await Task.sleep(nanoseconds:500_000_000)
                 await app.capture.start(screen:screen)
                 await waitForCapture(app,active:true)
-                require(model.capturing && app.capture.stream != nil,"capture started")
-                let old=app.capture.stream
+                require(model.capturing && app.capture.activeID != nil,"capture started")
+                let old=app.capture.activeID,oldStream=app.capture.stream
                 await app.capture.start(screen:nil)
-                require(!model.capturing && app.capture.stream==nil && app.capture.latest()==nil,"capture pause")
+                require(!model.capturing && app.capture.activeID==nil && app.capture.latest()==nil,"capture pause")
                 let first=Task{@MainActor in await app.capture.start(screen:screen)}
                 let hide=Task{@MainActor in await app.capture.start(screen:nil)}
                 let last=Task{@MainActor in await app.capture.start(screen:screen)}
                 await first.value;await hide.value;await last.value
                 await waitForCapture(app,active:true)
-                require(model.capturing && app.capture.stream != nil,"latest capture request wins")
-                if let old {
-                    app.capture.stream(old,didStopWithError:NSError(domain:"stale-test",code:1))
-                    try? await Task.sleep(nanoseconds:100_000_000)
-                    require(model.capturing,"stale stream callback ignored")
-                }
+                require(model.capturing && app.capture.activeID != nil,"latest capture request wins")
+                app.capture.interruptForSelfTest(NSError(domain:"stale-test",code:1),sourceID:old)
+                if let oldStream {app.capture.stream(oldStream,didStopWithError:NSError(domain:"stale-test",code:1))}
+                try? await Task.sleep(nanoseconds:100_000_000)
+                require(model.capturing,"stale source callback ignored")
                 for _ in 0..<50 {
                     if app.capture.latest() != nil {break}
                     try? await Task.sleep(nanoseconds:100_000_000)
@@ -84,6 +84,9 @@ enum NativeSelfTest {
                 app.togglePet()
                 await waitForCapture(app,active:true)
                 await recoveryChecks(app,screen:screen)
+                await regionCaptureChecks(app,screen:screen)
+                await streamStartRetargetChecks(app,screen:screen)
+                if let backdrop {await adaptiveCaptureChecks(app,screen:screen,backdrop:backdrop)}
                 await app.suspendActivity(.display)
                 await app.suspendActivity(.session)
                 let dormant=app.view.drawnFrames
@@ -108,6 +111,7 @@ enum NativeSelfTest {
                 await app.capture.start(screen:screen,requestPermission:false)
                 await waitForCapture(app,active:true)
                 log("RENDER_SCHEDULING_TEST_PASS paused-static no-redraw resume-redraw")
+                await snapshotLifecycleChecks(app,screen:screen)
                 log("CAPTURE_TEST_PASS pause rapid-reconnect stale-callback real-frames")
             } else {
                 log("CAPTURE_TEST_SKIPPED screen permission unavailable")
@@ -120,6 +124,10 @@ enum NativeSelfTest {
     @MainActor static func performanceRun(_ app:AppDelegate) {
         model.codexAuto=false;model.wander=false;model.paused=false
         model.setCodexState(.longTask,source:"performance-test")
+        let experimental=ProcessInfo.processInfo.environment.keys.contains {
+            $0.hasPrefix("SINGULARITY_BENCHMARK_") && !["SINGULARITY_BENCHMARK_SECONDS","SINGULARITY_BENCHMARK_BACKEND"].contains($0)
+        }
+        if experimental {app.capture.forceStream=true;app.capture.framesPerSecond=30}
         Task{@MainActor in
             await waitForCapture(app,active:true)
             try? await Task.sleep(nanoseconds:3_000_000_000)
@@ -127,7 +135,134 @@ enum NativeSelfTest {
             let frames=app.view.drawnFrames,imports=app.view.importedFrames,copies=app.view.copiedFrames
             let duration=min(300,max(20,Double(ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_SECONDS"] ?? "") ?? 75))
             log("PERFORMANCE_RUN_BEGIN pid=\(getpid()) size=\(model.size) mass=\(model.mass) cache=\(app.view.geometryCache?.rebuilds ?? 0)")
-            if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ALTERNATE"]=="1" {
+            if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ADAPTIVE"]=="1" {
+                app.capture.forceStream=false;app.capture.framesPerSecond=10
+                for mode in ["fixed","adaptive","fixed","adaptive"] {
+                    app.capture.adaptiveSampling=mode=="adaptive"
+                    await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                    await waitForCapture(app,active:true)
+                    try? await Task.sleep(nanoseconds:3_000_000_000)
+                    let before=app.capture.screenshotRequests,unchanged=app.capture.unchangedScreenshots,imports=app.view.importedFrames
+                    let comparisons=app.capture.comparisonMilliseconds.count,draws=app.view.drawnFrames
+                    log("ISOLATE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                    try? await Task.sleep(nanoseconds:30_000_000_000)
+                    let times=Array(app.capture.comparisonMilliseconds.dropFirst(comparisons)).sorted()
+                    if !times.isEmpty {
+                        log("CAPTURE_COMPARISON_COST mode=\(mode) count=\(times.count) p50ms=\(times[times.count/2]) p95ms=\(times[min(times.count-1,Int(Double(times.count)*0.95))]) maxms=\(times.last!) draws=\(app.view.drawnFrames-draws)")
+                    }
+                    log("ISOLATE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode) requests=\(app.capture.screenshotRequests-before) unchanged=\(app.capture.unchangedScreenshots-unchanged) imports=\(app.view.importedFrames-imports) fps=\(app.capture.appliedFramesPerSecond)")
+                }
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_FILTER"]=="1" {
+                app.capture.forceStream=true;app.capture.framesPerSecond=10
+                for mode in ["application","windows","nominal","windowNominal"] {
+                    app.capture.benchmarkWindowFilter=mode=="windows" || mode=="windowNominal"
+                    app.capture.benchmarkNominalResolution=mode=="nominal" || mode=="windowNominal"
+                    await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                    await waitForCapture(app,active:true)
+                    try? await Task.sleep(nanoseconds:3_000_000_000)
+                    log("ISOLATE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                    try? await Task.sleep(nanoseconds:30_000_000_000)
+                    log("ISOLATE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                }
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_BACKEND"]=="1" {
+                for mode in ["stream","snapshot","stream","snapshot"] {
+                    app.capture.forceStream=mode=="stream"
+                    app.capture.framesPerSecond=mode=="stream" ? 30:10
+                    await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                    await waitForCapture(app,active:true)
+                    try? await Task.sleep(nanoseconds:3_000_000_000)
+                    let before=app.view.importedFrames
+                    log("ISOLATE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                    try? await Task.sleep(nanoseconds:30_000_000_000)
+                    log("ISOLATE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode) imports=\(app.view.importedFrames-before)")
+                }
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_SCREENSHOT"]=="1" {
+                if #available(macOS 14.0, *) {
+                    guard let screen=app.pet.screen ?? NSScreen.main else {require(false,"benchmark screen");return}
+                    let content=try! await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
+                    let id=(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+                    let display=content.displays.first{$0.displayID==id}!
+                    let own=content.applications.filter{$0.processID==getpid()}
+                    let filter=SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
+                    let region=CaptureRegion.region(for:app.pet.frame,on:screen.frame)
+                    let config=SCStreamConfiguration()
+                    config.sourceRect=CaptureRegion.sourceRect(region,on:screen.frame)
+                    config.width=Int((region.width*CGFloat(filter.pointPixelScale)).rounded(.up))
+                    config.height=Int((region.height*CGFloat(filter.pointPixelScale)).rounded(.up))
+                    config.pixelFormat=kCVPixelFormatType_32BGRA;config.showsCursor=false;config.capturesAudio=false
+                    let cadence=ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_SCREENSHOT_CADENCE"]=="1"
+                    for mode in cadence ? ["screenshot30","screenshot10","screenshot30","screenshot10"] : ["stream","screenshot","stream","screenshot"] {
+                        var screenshots:Task<Void,Never>?
+                        if mode=="stream" {
+                            await app.capture.start(screen:screen,requestPermission:false)
+                        } else {
+                            await app.capture.start(screen:nil)
+                            screenshots=Task{@MainActor in
+                                var count=0
+                                while !Task.isCancelled {
+                                    let began=ProcessInfo.processInfo.systemUptime
+                                    do {
+                                        let sample=try await SCScreenshotManager.captureSampleBuffer(contentFilter:filter,configuration:config)
+                                        guard !Task.isCancelled else{return}
+                                        guard let image=CMSampleBufferGetImageBuffer(sample) else {require(false,"screenshot pixels");return}
+                                        app.capture.supplyBenchmarkSnapshot(Capture.Snapshot(buffer:image,rect:region))
+                                        count+=1
+                                        if count==1 {log("SCREENSHOT_BENCHMARK_FRAME pixels=\(CVPixelBufferGetWidth(image))x\(CVPixelBufferGetHeight(image))")}
+                                        let delay=max(0,1.0/(mode=="screenshot10" ? 10:30)-(ProcessInfo.processInfo.systemUptime-began))
+                                        try await Task.sleep(nanoseconds:UInt64(delay*1_000_000_000))
+                                    } catch {
+                                        if Task.isCancelled {return}
+                                        require(false,"screenshot benchmark \(error)")
+                                    }
+                                }
+                            }
+                        }
+                        await waitForCapture(app,active:true)
+                        try? await Task.sleep(nanoseconds:3_000_000_000)
+                        let before=app.view.importedFrames
+                        log("ISOLATE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                        try? await Task.sleep(nanoseconds:30_000_000_000)
+                        log("ISOLATE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode) imports=\(app.view.importedFrames-before)")
+                        screenshots?.cancel();await screenshots?.value
+                    }
+                } else {require(false,"screenshot benchmark requires macOS 14")}
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ISOLATE"]=="1" {
+                for mode in ["both","render","capture","neither","both","render","capture","neither"] {
+                    let captures=mode=="both" || mode=="capture"
+                    app.view.setRenderingActive(mode=="both" || mode=="render")
+                    await app.capture.start(screen:captures ? (app.pet.screen ?? NSScreen.main):nil,requestPermission:false)
+                    await waitForCapture(app,active:captures)
+                    try? await Task.sleep(nanoseconds:3_000_000_000)
+                    log("ISOLATE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                    try? await Task.sleep(nanoseconds:20_000_000_000)
+                    log("ISOLATE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) mode=\(mode)")
+                }
+                app.view.setRenderingActive(true)
+                await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                await waitForCapture(app,active:true)
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_CADENCE"]=="1" {
+                for fps in [30,10,30,10] {
+                    app.capture.framesPerSecond=fps
+                    await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                    await waitForCapture(app,active:true)
+                    try? await Task.sleep(nanoseconds:3_000_000_000)
+                    let snapshot=app.capture.latestSnapshot()!
+                    log("CAPTURE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) full=false fps=\(fps) pixels=\(CVPixelBufferGetWidth(snapshot.buffer))x\(CVPixelBufferGetHeight(snapshot.buffer))")
+                    try? await Task.sleep(nanoseconds:30_000_000_000)
+                    log("CAPTURE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) full=false fps=\(fps)")
+                }
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_CAPTURE"]=="1" {
+                for fullDisplay in [true,false,true,false] {
+                    app.capture.forceFullDisplay=fullDisplay
+                    await app.capture.start(screen:app.pet.screen ?? NSScreen.main,requestPermission:false)
+                    await waitForCapture(app,active:true)
+                    try? await Task.sleep(nanoseconds:3_000_000_000)
+                    let snapshot=app.capture.latestSnapshot()!
+                    log("CAPTURE_PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) full=\(fullDisplay) pixels=\(CVPixelBufferGetWidth(snapshot.buffer))x\(CVPixelBufferGetHeight(snapshot.buffer))")
+                    try? await Task.sleep(nanoseconds:30_000_000_000)
+                    log("CAPTURE_PERFORMANCE_PHASE_END uptime=\(ProcessInfo.processInfo.systemUptime) full=\(fullDisplay)")
+                }
+            } else if ProcessInfo.processInfo.environment["SINGULARITY_BENCHMARK_ALTERNATE"]=="1" {
                 for phase in 0..<8 {
                     app.view.benchmarkDirectGeometry=phase%2==0
                     log("PERFORMANCE_PHASE uptime=\(ProcessInfo.processInfo.systemUptime) direct=\(app.view.benchmarkDirectGeometry)")
@@ -167,16 +302,16 @@ enum NativeSelfTest {
     @MainActor static func recoveryChecks(_ app:AppDelegate,screen:NSScreen) async {
         let capture=app.capture
         func interrupt(_ code:Int) {
-            guard let active=capture.stream else {require(false,"fault injection requires active stream");return}
-            capture.stream(active,didStopWithError:NSError(domain:SCStreamErrorDomain,code:code))
+            require(capture.activeID != nil,"fault injection requires active source")
+            capture.interruptForSelfTest(NSError(domain:SCStreamErrorDomain,code:code),sourceID:capture.activeID)
         }
         capturedRenderCheck(app.view)
-        let before=capture.stream,oldFrame=capture.latest()
+        let before=capture.activeID,oldFrame=capture.latest()
         interrupt(-3805)
         try? await Task.sleep(nanoseconds:200_000_000)
         require(!model.capturing && capture.retryPending,"active interruption schedules recovery")
         await waitForCapture(app,active:true)
-        require(capture.stream !== before && capture.latest() !== oldFrame,"recovery replaces stream and frame")
+        require(capture.activeID != before && capture.latest() !== oldFrame,"recovery replaces source and frame")
         capturedRenderCheck(app.view)
         if ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_FIXTURE"] != nil {
             let wasPaused=model.paused
@@ -200,7 +335,7 @@ enum NativeSelfTest {
             log("CAPTURE_REFRESH_TEST_PASS live-generated-backdrop after-recovery sustained-frames")
         }
         if let before {
-            capture.stream(before,didStopWithError:NSError(domain:SCStreamErrorDomain,code:-3817))
+            capture.interruptForSelfTest(NSError(domain:SCStreamErrorDomain,code:-3817),sourceID:before)
             try? await Task.sleep(nanoseconds:100_000_000)
             require(model.capturing,"late user-stop from old stream cannot stop replacement")
         }
@@ -210,26 +345,26 @@ enum NativeSelfTest {
         app.togglePet()
         await waitForCapture(app,active:false)
         try? await Task.sleep(nanoseconds:2_200_000_000)
-        require(!capture.wantsCapture && !capture.retryPending && capture.stream==nil,"hide cancels pending retry")
+        require(!capture.wantsCapture && !capture.retryPending && capture.activeID==nil,"hide cancels pending retry")
         app.togglePet()
         await waitForCapture(app,active:true)
 
         // Exercise the same entry points as workspace events without sleeping the user's Mac.
         await capture.suspend()
-        require(!model.capturing && capture.stream==nil && capture.wantsCapture,"workspace suspension")
+        require(!model.capturing && capture.activeID==nil && capture.wantsCapture,"workspace suspension")
         await capture.suspend(.display)
         await capture.resume(screen:screen)
-        require(capture.stream==nil,"overlapping suspension waits for all wake events")
+        require(capture.activeID==nil,"overlapping suspension waits for all wake events")
         await capture.resume(.display,screen:screen)
         await waitForCapture(app,active:true)
         capturedRenderCheck(app.view)
         for code in [-3817,-3801,-3821] {
             interrupt(code)
             try? await Task.sleep(nanoseconds:1_200_000_000)
-            require(!capture.wantsCapture && !capture.retryPending && capture.stream==nil,"terminal stop \(code)")
+            require(!capture.wantsCapture && !capture.retryPending && capture.activeID==nil,"terminal stop \(code)")
             await capture.suspend();await capture.resume(screen:screen)
             await capture.retarget(screen:screen)
-            require(capture.stream==nil && !capture.wantsCapture,"lifecycle respects terminal stop")
+            require(capture.activeID==nil && !capture.wantsCapture,"lifecycle respects terminal stop")
             await capture.start(screen:screen,requestPermission:false)
             await waitForCapture(app,active:true)
         }
@@ -240,11 +375,133 @@ enum NativeSelfTest {
         guard let path=ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_FIXTURE"] else{return nil}
         let process=Process()
         process.executableURL=URL(fileURLWithPath:path)
+        process.standardInput=Pipe()
         do {try process.run();return process}
         catch {require(false,"capture backdrop launch: \(error)");return nil}
     }
 
-    @discardableResult @MainActor static func capturedRenderCheck(_ view:PetView)->[UInt8] {
+    static func snapshotPixelChecks() {
+        func make(_ alignment:Int,_ padding:UInt8)->CVPixelBuffer {
+            var buffer:CVPixelBuffer?
+            require(CVPixelBufferCreate(kCFAllocatorDefault,7,5,kCVPixelFormatType_32BGRA,
+                [kCVPixelBufferBytesPerRowAlignmentKey:alignment] as CFDictionary,&buffer)==kCVReturnSuccess,"comparison buffer")
+            let result=buffer!
+            require(CVPixelBufferLockBaseAddress(result,[])==kCVReturnSuccess,"comparison write lock")
+            let base=CVPixelBufferGetBaseAddress(result)!,stride=CVPixelBufferGetBytesPerRow(result)
+            memset(base,Int32(padding),stride*5)
+            for row in 0..<5 {memset(base.advanced(by:row*stride),42,28)}
+            CVPixelBufferUnlockBaseAddress(result,[])
+            return result
+        }
+        let a=make(64,1),b=make(128,2),rect=CGRect(x:2,y:3,width:7,height:5)
+        let first=Capture.Snapshot(buffer:a,rect:rect),second=Capture.Snapshot(buffer:b,rect:rect)
+        require(Capture.samePixels(first,first),"identical immutable buffer")
+        require(Capture.samePixels(first,second),"comparison ignores unequal row padding")
+        require(!Capture.samePixels(first,Capture.Snapshot(buffer:a,rect:rect.offsetBy(dx:1,dy:0))),"same buffer at new coordinates is new content")
+        require(CVPixelBufferLockBaseAddress(b,[])==kCVReturnSuccess,"comparison mutation lock")
+        CVPixelBufferGetBaseAddress(b)!.storeBytes(of:UInt8(43),toByteOffset:4*CVPixelBufferGetBytesPerRow(b)+27,as:UInt8.self)
+        CVPixelBufferUnlockBaseAddress(b,[])
+        require(!Capture.samePixels(first,second),"comparison detects final pixel and alpha change")
+        log("CAPTURE_PIXEL_TEST_PASS equal padding stride final-pixel coordinates")
+    }
+
+    @MainActor static func adaptiveCaptureChecks(_ app:AppDelegate,screen:NSScreen,backdrop:Process) async {
+        guard #available(macOS 14.0, *),!app.capture.forceStream else{return}
+        guard let input=backdrop.standardInput as? Pipe else{require(false,"backdrop input");return}
+        func command(_ text:String) {input.fileHandleForWriting.write(Data(text.utf8))}
+        let capture=app.capture,oldFPS=model.backgroundFPS,oldPaused=model.paused,origin=app.pet.frame.origin
+        defer {
+            command("r");model.backgroundFPS=oldFPS;model.paused=oldPaused
+            app.pet.setFrameOrigin(origin);app.checkScreen()
+        }
+        model.backgroundFPS=10
+        // Keep this deterministic fixture away from the Dock and menu-bar overlays.
+        app.pet.setFrameOrigin(CGPoint(x:screen.frame.midX-app.pet.frame.width/2,y:screen.frame.midY-app.pet.frame.height/2))
+        await capture.retarget(screen:screen)
+        command("p")
+        let beforeIdle=capture.screenshotRequests,beforeUnchanged=capture.unchangedScreenshots
+        try? await Task.sleep(nanoseconds:2_000_000_000)
+        for _ in 0..<15 {
+            if capture.appliedFramesPerSecond==2 {break}
+            try? await Task.sleep(nanoseconds:200_000_000)
+        }
+        log("CAPTURE_ADAPTIVE_DIAGNOSTIC requests=\(capture.screenshotRequests-beforeIdle) unchanged=\(capture.unchangedScreenshots-beforeUnchanged) fps=\(capture.appliedFramesPerSecond)")
+        require(capture.appliedFramesPerSecond==2,"unchanged live backdrop enters idle cadence")
+        let requests=capture.screenshotRequests,frame=capture.latest(),draws=app.view.drawnFrames
+        try? await Task.sleep(nanoseconds:2_000_000_000)
+        require((3...5).contains(capture.screenshotRequests-requests),"idle capture continues bounded polling")
+        require(capture.latest() === frame,"unchanged screenshots retain the existing texture")
+        require(app.view.drawnFrames>=draws+48,"animation remains near 30 FPS while capture idles")
+        model.paused=true
+        try? await Task.sleep(nanoseconds:300_000_000)
+        let pausedDraws=app.view.drawnFrames
+        try? await Task.sleep(nanoseconds:1_000_000_000)
+        require(app.view.drawnFrames==pausedDraws,"identical screenshots do not redraw paused animation")
+        let oldPixels=capturedRenderCheck(app.view)
+        let before=ProcessInfo.processInfo.systemUptime
+        command("s")
+        for _ in 0..<60 {
+            if capture.latest() !== frame {break}
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        require(capture.latest() !== frame && capture.appliedFramesPerSecond==10,"new real pixels restore responsive capture")
+        require(ProcessInfo.processInfo.systemUptime-before<1.2,"live detection remains bounded after idle")
+        for _ in 0..<30 {
+            if app.view.drawnFrames>pausedDraws && app.view.uploaded === capture.latest() {break}
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        require(app.view.drawnFrames>pausedDraws && app.view.uploaded === capture.latest(),"normal paused draw path imports changed desktop")
+        require(capturedRenderCheck(app.view) != oldPixels,"step changes the rendered background pixels")
+        try? await Task.sleep(nanoseconds:1_500_000_000)
+        for _ in 0..<20 {
+            if capture.appliedFramesPerSecond==2 {break}
+            try? await Task.sleep(nanoseconds:200_000_000)
+        }
+        require(capture.appliedFramesPerSecond==2,"capture returns to idle after change")
+        app.view.dragging=true
+        await capture.retarget(screen:screen)
+        for _ in 0..<40 {
+            if capture.appliedFramesPerSecond==30 {break}
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        require(capture.appliedFramesPerSecond==30,"drag wakes idle sampling")
+        app.view.dragging=false
+        await capture.retarget(screen:screen)
+        log("CAPTURE_ADAPTIVE_TEST_PASS idle-live-poll no-upload animated paused-static change-detection drag-wake")
+    }
+
+    @MainActor static func streamStartRetargetChecks(_ app:AppDelegate,screen:NSScreen) async {
+        let capture=app.capture,oldForce=capture.forceStream,oldFPS=model.backgroundFPS,origin=app.pet.frame.origin
+        capture.forceStream=true;capture.selfTestStreamStartDelay=600_000_000
+        model.backgroundFPS=10
+        await capture.start(screen:nil)
+        let starting=Task{@MainActor in await capture.start(screen:screen,requestPermission:false)}
+        for _ in 0..<40 {
+            if capture.stream != nil {break}
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        require(capture.stream != nil && capture.busy,"stream startup delay active")
+        app.pet.setFrameOrigin(CGPoint(x:screen.frame.midX-app.pet.frame.width/2,y:screen.frame.midY-app.pet.frame.height/2))
+        model.backgroundFPS=15
+        await capture.retarget(screen:screen)
+        await starting.value
+        await waitForCapture(app,active:true)
+        let expected:CGRect
+        if #available(macOS 13.1, *) {expected=CaptureRegion.region(for:app.pet.frame,on:screen.frame)}
+        else {expected=screen.frame}
+        for _ in 0..<60 {
+            if capture.latestSnapshot()?.rect==expected && capture.appliedFramesPerSecond==15 {break}
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        require(capture.latestSnapshot()?.rect==expected && capture.appliedFramesPerSecond==15,"startup movement and cadence actually applied")
+        capture.selfTestStreamStartDelay=0;capture.forceStream=oldForce;model.backgroundFPS=oldFPS
+        app.pet.setFrameOrigin(origin)
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        log("CAPTURE_START_RETARGET_TEST_PASS delayed-start moved-crop updated-cadence")
+    }
+
+    @discardableResult @MainActor static func capturedRenderCheck(_ view:PetView,snapshot:Capture.Snapshot?=nil)->[UInt8] {
         require(model.capturing && view.capture.latest() != nil,"real background frame available")
         view.openGLContext?.makeCurrentContext()
         var previous:GLint=0
@@ -261,9 +518,10 @@ enum NativeSelfTest {
             glDeleteFramebuffers(1,&fbo);glDeleteTextures(1,&color)
         }
         require(glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))==GL_FRAMEBUFFER_COMPLETE,"capture framebuffer")
-        let fixedFrame=view.capture.latest()
+        let fixedFrame=snapshot ?? view.capture.latestSnapshot()
         func pixels(_ enabled:Bool,cpu:Bool=false)->[UInt8] {
-            view.renderFrame(width:280,height:280,useCapture:enabled,captureBuffer:fixedFrame,forceCPUUpload:cpu)
+            view.renderFrame(width:280,height:280,useCapture:enabled,captureBuffer:fixedFrame?.buffer,
+                             captureSourceRect:fixedFrame?.rect,forceCPUUpload:cpu)
             var bytes=[UInt8](repeating:0,count:280*280*4)
             bytes.withUnsafeMutableBytes{glReadPixels(0,0,280,280,GLenum(GL_RGBA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
             return bytes
@@ -294,15 +552,155 @@ enum NativeSelfTest {
         return with
     }
 
+    @MainActor static func regionCaptureChecks(_ app:AppDelegate,screen:NSScreen) async {
+        guard #available(macOS 13.1, *) else{return}
+        let capture=app.capture,origin=app.pet.frame.origin,oldPaused=model.paused
+        model.paused=true
+        capture.forceFullDisplay=true
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        guard let full=capture.latestSnapshot() else {require(false,"full reference frame");return}
+        let region=CaptureRegion.region(for:app.pet.frame,on:screen.frame)
+        let scale=CGFloat(CVPixelBufferGetWidth(full.buffer))/full.rect.width
+        let width=Int((region.width*scale).rounded()),height=Int((region.height*scale).rounded())
+        let x=Int(((region.minX-full.rect.minX)*scale).rounded())
+        let y=Int(((full.rect.maxY-region.maxY)*scale).rounded())
+        var cropped:CVPixelBuffer?
+        require(CVPixelBufferCreate(kCFAllocatorDefault,width,height,kCVPixelFormatType_32BGRA,
+                                   [kCVPixelBufferIOSurfacePropertiesKey:[:]] as CFDictionary,&cropped)==kCVReturnSuccess,"crop fixture allocation")
+        guard let cropped else {require(false,"crop fixture buffer");return}
+        require(CVPixelBufferLockBaseAddress(full.buffer,.readOnly)==kCVReturnSuccess,"full fixture lock")
+        require(CVPixelBufferLockBaseAddress(cropped,[])==kCVReturnSuccess,"crop fixture lock")
+        let source=CVPixelBufferGetBaseAddress(full.buffer)!,destination=CVPixelBufferGetBaseAddress(cropped)!
+        for row in 0..<height {
+            destination.advanced(by:row*CVPixelBufferGetBytesPerRow(cropped)).copyMemory(
+                from:source.advanced(by:(row+y)*CVPixelBufferGetBytesPerRow(full.buffer)+x*4),byteCount:width*4)
+        }
+        CVPixelBufferUnlockBaseAddress(cropped,[])
+        CVPixelBufferUnlockBaseAddress(full.buffer,.readOnly)
+        let fullPixels=capturedRenderCheck(app.view,snapshot:full)
+        let cropPixels=capturedRenderCheck(app.view,snapshot:Capture.Snapshot(buffer:cropped,rect:region))
+        let difference=zip(fullPixels,cropPixels).map{abs(Int($0)-Int($1))}.max() ?? 0
+        require(difference<=2,"full versus cropped background mapping: \(difference)")
+        capture.forceFullDisplay=false
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        let sourceID=capture.activeID,updates=capture.configurationUpdates
+        func waitForRegion(_ expected:CGRect,target:NSScreen?=nil,full:Bool=false) async {
+            let target=target ?? screen
+            for _ in 0..<100 {
+                try? await Task.sleep(nanoseconds:50_000_000)
+                if let snapshot=capture.latestSnapshot(),snapshot.rect.contains(expected) {
+                    if full && snapshot.rect != target.frame {continue}
+                    if !full && snapshot.rect==target.frame {continue}
+                    let resolution=CGFloat(CVPixelBufferGetWidth(snapshot.buffer))/snapshot.rect.width
+                    require(abs(resolution-target.backingScaleFactor)<0.02,"native pixel density preserved")
+                    return
+                }
+            }
+            require(false,"fresh frame covers requested region \(expected)")
+        }
+        for point in [CGPoint(x:screen.frame.minX+40,y:screen.frame.minY+40),
+                      CGPoint(x:screen.frame.midX-100,y:screen.frame.midY-100),
+                      CGPoint(x:screen.frame.maxX-app.pet.frame.width+40,y:screen.frame.maxY-app.pet.frame.height+40)] {
+            let previous=capture.latestSnapshot()
+            let previousRect=previous?.rect
+            app.pet.setFrameOrigin(point)
+            await capture.retarget(screen:screen)
+            await waitForRegion(app.pet.frame.intersection(screen.frame))
+            require(capture.activeID==sourceID,"moving crop reuses capture source")
+            require(previous?.rect==previousRect,"retained frame geometry is immutable")
+            capturedRenderCheck(app.view)
+        }
+        app.view.dragging=true
+        await capture.retarget(screen:screen)
+        await waitForRegion(screen.frame,full:true)
+        app.view.dragging=false
+        await capture.retarget(screen:screen)
+        await waitForRegion(app.pet.frame.intersection(screen.frame))
+        require(capture.configurationUpdates>updates,"region updates applied")
+        let oldFPS=model.backgroundFPS
+        for fps in [30,15,10] {
+            model.backgroundFPS=fps
+            await capture.retarget(screen:screen)
+            for _ in 0..<30 {
+                if capture.appliedFramesPerSecond==fps {break}
+                try? await Task.sleep(nanoseconds:50_000_000)
+            }
+            require(capture.appliedFramesPerSecond==fps && capture.activeID==sourceID,"cadence changes without replacing source")
+        }
+        model.backgroundFPS=oldFPS
+        let moves=(0..<12).map {i in Task{@MainActor in
+            app.pet.setFrameOrigin(CGPoint(x:screen.frame.minX+CGFloat(i)*24,y:screen.frame.minY+40))
+            await capture.retarget(screen:screen)
+        }}
+        for move in moves {await move.value}
+        await waitForRegion(app.pet.frame.intersection(screen.frame))
+        let update=Task{@MainActor in
+            app.pet.setFrameOrigin(CGPoint(x:screen.frame.midX,y:screen.frame.midY))
+            await capture.retarget(screen:screen)
+        }
+        let pause=Task{@MainActor in await capture.start(screen:nil)}
+        await update.value;await pause.value
+        try? await Task.sleep(nanoseconds:300_000_000)
+        require(!model.capturing && capture.activeID==nil && capture.latest()==nil,"in-flight region update cannot revive paused source")
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        var displaysChecked=1
+        for other in NSScreen.screens where other != screen {
+            app.pet.setFrameOrigin(CGPoint(x:other.frame.midX-app.pet.frame.width/2,y:other.frame.midY-app.pet.frame.height/2))
+            await capture.retarget(screen:other)
+            await waitForCapture(app,active:true)
+            await waitForRegion(app.pet.frame.intersection(other.frame),target:other)
+            capturedRenderCheck(app.view)
+            displaysChecked+=1
+        }
+        app.pet.setFrameOrigin(origin)
+        await capture.retarget(screen:screen)
+        await waitForCapture(app,active:true)
+        await waitForRegion(app.pet.frame.intersection(screen.frame))
+        model.paused=oldPaused
+        log("CAPTURE_REGION_TEST_PASS pixel-equivalence=\(difference) displays=\(displaysChecked) native-scale moving-crop same-source dragging-full restore-crop immutable-frame cadence rapid-move pause-race")
+    }
+
     @MainActor static func waitForCapture(_ app:AppDelegate,active:Bool) async {
         for _ in 0..<80 {
             try? await Task.sleep(nanoseconds:100_000_000)
             if !app.capture.busy && model.capturing==active {
                 if active && app.capture.latest() != nil {return}
-                if !active && app.capture.stream==nil {return}
+                if !active && app.capture.activeID==nil {return}
             }
         }
         require(false,"visibility/capture reconciliation active=\(active): \(model.error)")
+    }
+
+    @MainActor static func snapshotLifecycleChecks(_ app:AppDelegate,screen:NSScreen) async {
+        guard #available(macOS 14.0, *),!app.capture.forceStream else{return}
+        let capture=app.capture
+        let requests=capture.screenshotRequests
+        capture.selfTestScreenshotDelay=500_000_000
+        for _ in 0..<30 {
+            if capture.screenshotRequests>requests {break}
+            try? await Task.sleep(nanoseconds:20_000_000)
+        }
+        require(capture.screenshotRequests>requests,"delayed snapshot request starts")
+        await capture.start(screen:nil)
+        try? await Task.sleep(nanoseconds:600_000_000)
+        require(capture.activeID==nil && capture.latest()==nil && !model.capturing,"late snapshot cannot revive hidden capture")
+        capture.selfTestScreenshotDelay=0
+        await capture.start(screen:screen,requestPermission:false)
+        await waitForCapture(app,active:true)
+        capturedRenderCheck(app.view)
+        capture.selfTestScreenshotDelay=4_000_000_000
+        let previous=capture.activeID
+        for _ in 0..<120 {
+            try? await Task.sleep(nanoseconds:50_000_000)
+            if model.capturing && capture.stream != nil && capture.activeID != previous {break}
+        }
+        capture.selfTestScreenshotDelay=0
+        require(model.capturing && capture.stream != nil && capture.activeID != previous,"stalled snapshot falls back to a fresh stream")
+        capturedRenderCheck(app.view)
+        log("CAPTURE_SNAPSHOT_TEST_PASS late-frame pause resume timeout stream-fallback real-background")
     }
 
     static func renderChecks(_ view:PetView) {

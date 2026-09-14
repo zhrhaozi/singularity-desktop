@@ -6,6 +6,49 @@ struct PetScreen {
     let visibleFrame: CGRect
 }
 
+enum CaptureCadence {
+    static func normalized(_ value:Int)->Int {[10,15,30].contains(value) ? value:10}
+    static func rate(preferred:Int,dragging:Bool)->Int {dragging ? 30:normalized(preferred)}
+}
+
+struct AdaptiveCaptureCadence {
+    private var lastChange:TimeInterval?
+    mutating func reset() {lastChange=nil}
+    mutating func rate(preferred:Int,dragging:Bool,changed:Bool,now:TimeInterval)->Int {
+        if changed || dragging || lastChange==nil {lastChange=now}
+        let requested=CaptureCadence.rate(preferred:preferred,dragging:dragging)
+        guard requested==10 else{return requested}
+        return now-(lastChange ?? now)>=0.75 ? 2:10
+    }
+}
+
+enum CaptureRegion {
+    static func region(for pet: CGRect, on screen: CGRect, retaining current: CGRect? = nil) -> CGRect {
+        let required = pet.insetBy(dx: -2, dy: -2).intersection(screen)
+        guard !required.isEmpty, !required.isNull else { return screen }
+        let guardBand = pet.insetBy(dx: -16, dy: -16).intersection(screen)
+        let fresh = pet.insetBy(dx: -64, dy: -64).integral.intersection(screen)
+        if let current, screen.contains(current), current.contains(guardBand),
+           current.width * current.height <= fresh.width * fresh.height * 1.5 { return current }
+        return fresh
+    }
+
+    static func sourceRect(_ region: CGRect, on screen: CGRect) -> CGRect {
+        CGRect(x: region.minX - screen.minX, y: screen.maxY - region.maxY,
+               width: region.width, height: region.height)
+    }
+
+    static func globalRect(_ reported: CGRect, on screen: CGRect, displayBounds: CGRect) -> CGRect? {
+        guard [reported.minX, reported.minY, reported.width, reported.height].allSatisfy(\.isFinite),
+              reported.width > 0, reported.height > 0 else { return nil }
+        let converted = CGRect(x: screen.minX + reported.minX - displayBounds.minX,
+                               y: screen.maxY - (reported.maxY - displayBounds.minY),
+                               width: reported.width, height: reported.height)
+        guard screen.insetBy(dx: -1, dy: -1).contains(converted) else { return nil }
+        return converted
+    }
+}
+
 enum PetPlacement {
     static func recoveredOrigin(for pet: CGRect, screens: [PetScreen]) -> CGPoint {
         let center = CGPoint(x: pet.midX, y: pet.midY)
