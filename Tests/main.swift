@@ -276,7 +276,9 @@ let cliPath = CommandLine.arguments[2]
 try FileManager.default.createDirectory(at: fixtures, withIntermediateDirectories: true)
 final class TestClock {
     var time: TimeInterval = 0
-    let epoch = Date()
+    // An integral epoch round-trips through filesystem mtime without rounding
+    // across the exact 12-second freshness boundary on different macOS SDKs.
+    let epoch = Date(timeIntervalSince1970: 1_700_000_000)
     var date: Date { epoch.addingTimeInterval(time) }
 }
 func writeFixture(_ url: URL, _ value: CodexStateSnapshot, modified: Date) throws {
