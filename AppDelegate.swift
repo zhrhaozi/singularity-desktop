@@ -160,7 +160,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         }
         checkScreen()
     }
-    func enableCapture(requestPermission:Bool=true,retryPreferredBackend:Bool=false){guard model.rendererError.isEmpty,model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen,requestPermission:requestPermission,retryPreferredBackend:retryPreferredBackend)}}
+    func enableCapture(requestPermission:Bool=true,retryPreferredBackend:Bool=false){guard !RunMode.renderOnly,model.rendererError.isEmpty,model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen,requestPermission:requestPermission,retryPreferredBackend:retryPreferredBackend)}}
     func restartCodexBridge(settingsVisible:Bool?=nil){
         let settingsActive=settingsVisible ?? (settings?.isVisible==true && settings?.isMiniaturized==false)
         if idleReasons.isEmpty {codexBridge?.restartIfNeeded(active:model.visible || settingsActive)}
@@ -181,5 +181,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         await capture.resume(reason,screen:pet.screen ?? NSScreen.main)
     }
     func checkScreen(){guard capture.wantsCapture,let s=pet.screen ?? NSScreen.main else{return};Task{@MainActor in await capture.retarget(screen:s)}}
-    func runSelfTest(){DispatchQueue.main.asyncAfter(deadline:.now()+2){NativeSelfTest.run(self)}}
+    func runSelfTest() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await NativeSelfTest.run(self)
+        }
+    }
 }

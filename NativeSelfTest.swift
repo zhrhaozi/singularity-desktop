@@ -25,7 +25,7 @@ enum NativeSelfTest {
         log("SHADER_FAILURE_TEST_PASS missing-resource compile-error link-error")
     }
 
-    @MainActor static func run(_ app:AppDelegate) {
+    @MainActor static func run(_ app:AppDelegate) async {
         if RunMode.performance {
             performanceRun(app)
             return
@@ -37,7 +37,10 @@ enum NativeSelfTest {
         let oldSize=model.size,oldOrigin=app.pet.frame.origin
         for size in [280.0,440.0,700.0] {
             model.size=size
-            RunLoop.main.run(until: Date().addingTimeInterval(0.20))
+            // Yield the main executor so the same debounced resize used by the UI can run.
+            for _ in 0..<80 where abs(app.pet.frame.width-size) >= 1 {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
             require(abs(app.pet.frame.width-size)<1,"resize \(size)")
         }
         if let screen=app.pet.screen ?? NSScreen.main {
