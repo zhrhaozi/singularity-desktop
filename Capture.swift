@@ -465,7 +465,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard Self.isRecoverable(error),CGPreflightScreenCaptureAccess() else {
             requestedScreen=nil
             model.captureState="桌面采集已停止"
-            model.error="请检查屏幕录制权限，然后点击「开启桌面透镜」。(\(e.domain) \(e.code))"
+            model.error="请检查屏幕录制权限，然后点击「连接透镜」。(\(e.domain) \(e.code))"
             return
         }
         guard let delay=retryBudget.nextDelay(at:ProcessInfo.processInfo.systemUptime) else {

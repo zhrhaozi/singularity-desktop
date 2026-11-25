@@ -5,7 +5,7 @@ let model = Model(defaults: RunMode.selfTest ? nil : .standard)
 var appDelegate: AppDelegate?
 func log(_ message:String) { NSLog("[Singularity] %@",message) }
 
-final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
+final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDelegate {
     var pet:PetWindow!
     var view:PetView!
     var settings:NSWindow!
@@ -58,10 +58,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
             pet.setFrameOrigin(PetPlacement.recoveredOrigin(for:proposed,screens:petScreens))
         }
         pet.orderFrontRegardless()
-        settings=NSWindow(contentRect:NSRect(x:0,y:0,width:490,height:700),styleMask:[.titled,.closable,.miniaturizable],backing:.buffered,defer:false)
-        settings.delegate=self
-        settings.level=NSWindow.Level(rawValue:NSWindow.Level.floating.rawValue+1);settings.title="奇点 · 黑洞控制室";settings.contentView=NSHostingView(rootView:SettingsView(state:model));settings.isReleasedWhenClosed=false;settings.center();settings.appearance=NSAppearance(named:.darkAqua)
-        status=NSStatusBar.system.statusItem(withLength:NSStatusItem.squareLength);status.button?.image=NSImage(systemSymbolName:"circle.circle",accessibilityDescription:"奇点");status.menu=makeMenu()
+        settings = makeSettingsWindow()
+        status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        status.button?.image = NSImage(systemSymbolName: "circle.circle.fill", accessibilityDescription: "奇点")
+        status.menu = makeMenu()
         if !RunMode.petOnly { showSettings() }
         if !RunMode.selfTest {
             codexBridge=CodexStateBridge(model:model)
@@ -73,7 +73,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
             enableCapture(requestPermission:false)
         } else {
             model.captureState="需要屏幕录制权限"
-            model.error="真实桌面扭曲需要屏幕录制权限。请点击「开启桌面透镜」，或在系统设置 → 隐私与安全性 → 屏幕与系统音频录制中允许「奇点」。"
+            model.error="真实桌面扭曲需要屏幕录制权限。请在系统设置的屏幕录制权限中允许「奇点」，再点「连接透镜」。"
         }
         NotificationCenter.default.addObserver(forName:NSApplication.didChangeScreenParametersNotification,object:nil,queue:.main){[weak self] _ in self?.screenParametersChanged()}
         let workspace=NSWorkspace.shared.notificationCenter
@@ -107,7 +107,55 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         log("APP_READY")
         if RunMode.selfTest {runSelfTest()}
     }
-    func makeMenu()->NSMenu {let m=NSMenu();m.addItem(withTitle:"黑洞设置…",action:#selector(showSettings),keyEquivalent:",");m.addItem(withTitle:"显示 / 隐藏宠物",action:#selector(togglePet),keyEquivalent:"");m.addItem(withTitle:"将黑洞移回屏幕中央",action:#selector(centerPet),keyEquivalent:"");m.addItem(.separator());m.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");for i in m.items{i.target=self};return m}
+    func makeSettingsWindow() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "奇点 · 黑洞控制室"
+        window.level = .normal
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .darkAqua)
+        window.contentView = NSHostingView(rootView: SettingsView(state: model))
+        window.contentMinSize = NSSize(width: 520, height: 540)
+        window.center()
+        if !RunMode.selfTest { window.setFrameAutosaveName("Singularity.SettingsWindow") }
+        window.delegate = self
+        return window
+    }
+
+    func makeMenu() -> NSMenu {
+        let menu = NSMenu(); menu.autoenablesItems = false; menu.delegate = self
+        menuNeedsUpdate(menu)
+        return menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        @discardableResult func item(_ title: String, _ action: Selector?, key: String = "") -> NSMenuItem {
+            let entry = menu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            entry.target = self; return entry
+        }
+        func choices(_ title: String, _ names: [String], first: Int, selected: Int, action: Selector) {
+            let child = NSMenu(title: title)
+            for (i, name) in names.enumerated() {
+                let option = child.addItem(withTitle: name, action: action, keyEquivalent: "")
+                option.target = self; option.tag = first + i; option.state = option.tag == selected ? .on : .off
+            }
+            item(title, nil).submenu = child
+        }
+        item("黑洞设置…", #selector(showSettings), key: ",")
+        menu.addItem(.separator())
+        item("显示桌宠", #selector(togglePet)).state = model.visible ? .on : .off
+        item("暂停流动", #selector(togglePause)).state = model.paused ? .on : .off
+        choices("黑洞系统", PetChoices.systems, first: 1, selected: model.bodyCount, action: #selector(selectSystem(_:)))
+        choices("吸积盘风格", PetChoices.styles, first: 0, selected: model.style, action: #selector(selectStyle(_:)))
+        item("移回屏幕中央", #selector(centerPet))
+        menu.addItem(.separator())
+        item("Codex：" + model.codexState.label, nil).isEnabled = false
+        item("退出奇点", #selector(quit), key: "q")
+    }
+    @objc private func togglePause() { model.paused.toggle() }
+    @objc private func selectSystem(_ item: NSMenuItem) { model.bodyCount = item.tag }
+    @objc private func selectStyle(_ item: NSMenuItem) { model.style = item.tag }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {showSettings();return true}
     @objc func showSettings(){
         guard !RunMode.performance else {log("PERFORMANCE_SETTINGS_LOCKED");return}
@@ -124,7 +172,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     func windowDidDeminiaturize(_ notification:Notification) {
         if notification.object as? NSWindow === settings {restartCodexBridge()}
     }
-    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.3.0",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole；多体运动使用 Chipmunk2D（MIT）。")])}
+    @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:RunMode.version,.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole；多体运动使用 Chipmunk2D（MIT）。")])}
     func applicationWillTerminate(_ notification:Notification){ if pendingResize != nil { resizePet() }; model.flushPreferences(); savePosition() }
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){
