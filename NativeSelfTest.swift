@@ -11,7 +11,7 @@ enum NativeSelfTest {
     }
 
     @MainActor static func run(_ app:AppDelegate) {
-        if CommandLine.arguments.contains("--self-test-performance") {
+        if RunMode.performance {
             performanceRun(app)
             return
         }
@@ -49,7 +49,7 @@ enum NativeSelfTest {
         multiBodyRenderChecks(app.view)
         recoveryPolicyChecks()
         snapshotPixelChecks()
-        if CommandLine.arguments.contains("--self-test-render-only") {
+        if RunMode.renderOnly {
             log("SELF_TEST_PASS generated-texture renderer-only")
             NSApp.terminate(nil)
             return

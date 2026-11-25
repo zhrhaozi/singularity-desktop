@@ -9,7 +9,7 @@ else
   SWIFT=(swiftc)
 fi
 bash scripts/build-physics.sh
-"${SWIFT[@]}" -swift-version 5 -O -target arm64-apple-macosx13.0 -import-objc-header PhysicsBridge.h main.swift Behavior.swift CodexState.swift RenderCache.swift MultiLensRenderer.swift OrbitalSystem.swift NativeSelfTest.swift .build/physics/libSingularityPhysics.a -o "$DEST/奇点.app/Contents/MacOS/Singularity" -framework Cocoa -framework SwiftUI -framework ScreenCaptureKit -framework OpenGL 2>&1 | tee build.log
+"${SWIFT[@]}" -swift-version 5 -O -target arm64-apple-macosx13.0 -import-objc-header PhysicsBridge.h main.swift RunMode.swift Model.swift Capture.swift PetView.swift SettingsView.swift AppDelegate.swift Behavior.swift CodexState.swift RenderCache.swift MultiLensRenderer.swift OrbitalSystem.swift NativeSelfTest.swift .build/physics/libSingularityPhysics.a -o "$DEST/奇点.app/Contents/MacOS/Singularity" -framework Cocoa -framework SwiftUI -framework ScreenCaptureKit -framework OpenGL 2>&1 | tee build.log
 cp Resources/* "$DEST/奇点.app/Contents/Resources/"
 cp Vendor/Chipmunk2D/LICENSE.txt "$DEST/奇点.app/Contents/Resources/Chipmunk2D-LICENSE.txt"
 cat > "$DEST/奇点.app/Contents/Info.plist" <<'PLIST'
