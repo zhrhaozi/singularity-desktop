@@ -15,6 +15,21 @@ private enum SettingsPrompt: Int, Identifiable {
     var id: Int { rawValue }
 }
 
+/// Draw just the horizontal rail: AppKit still owns the knob, tracking, focus ring and keyboard.
+private final class ParameterSliderCell: NSSliderCell {
+    override func drawBar(inside rect: NSRect, flipped: Bool) {
+        let rail = NSRect(x: rect.minX, y: rect.midY - 2, width: rect.width, height: 4)
+        NSColor(white: 1, alpha: 0.17).setFill()
+        NSBezierPath(roundedRect: rail, xRadius: 2, yRadius: 2).fill()
+        let middle = min(rail.maxX, max(rail.minX, knobRect(flipped: flipped).midX))
+        let rtl = controlView?.userInterfaceLayoutDirection == .rightToLeft
+        let filled = NSRect(x: rtl ? middle : rail.minX, y: rail.minY,
+                            width: rtl ? rail.maxX - middle : middle - rail.minX, height: rail.height)
+        NSColor(srgbRed: 0.96, green: 0.74, blue: 0.44, alpha: isEnabled ? 1 : 0.45).setFill()
+        NSBezierPath(roundedRect: filled, xRadius: 2, yRadius: 2).fill()
+    }
+}
+
 /// Keep AppKit's keyboard, continuous tracking and VoiceOver semantics, and tint the native track.
 private struct ParameterSlider: NSViewRepresentable {
     @Binding var value: Double
@@ -29,9 +44,9 @@ private struct ParameterSlider: NSViewRepresentable {
     }
     func makeCoordinator() -> Coordinator { Coordinator($value) }
     func makeNSView(context: Context) -> NSSlider {
-        let slider = NSSlider(value: value, minValue: range.lowerBound, maxValue: range.upperBound,
-                              target: context.coordinator, action: #selector(Coordinator.change(_:)))
-        slider.trackFillColor = NSColor(srgbRed: 0.96, green: 0.74, blue: 0.44, alpha: 1)
+        let slider = NSSlider(frame: .zero)
+        slider.cell = ParameterSliderCell()
+        slider.target = context.coordinator; slider.action = #selector(Coordinator.change(_:))
         slider.isContinuous = true
         slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return slider

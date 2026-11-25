@@ -6,10 +6,10 @@ permissions:
   contents: read
 jobs:
   macos:
-    runs-on: macos-latest
+    runs-on: macos-15  # Apple Silicon; keep the runner generation explicit.
     steps:
-      - uses: actions/checkout@v4
-      - name: Test movement and color parsing
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Test behavior, preferences, local bridge and shaders
         run: ./scripts/test.sh
       - name: Test Chipmunk multi-body motion
         run: bash scripts/test-orbital.sh

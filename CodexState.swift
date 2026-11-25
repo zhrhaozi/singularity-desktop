@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum CodexActivityState: Int, CaseIterable, Codable {
     case idle = 0, thinking = 1, command = 2, longTask = 3, complete = 4, error = 5
@@ -197,12 +198,20 @@ struct CodexStateMachine {
 struct CodexStateFile {
     static let lifetime: TimeInterval = 12
     static func read(_ url: URL, now: Date) -> CodexStateSnapshot? {
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let modified = attributes[.modificationDate] as? Date,
-              let size = attributes[.size] as? NSNumber, size.intValue <= 65536,
-              now.timeIntervalSince(modified) >= 0,
-              now.timeIntervalSince(modified) < lifetime,
-              let data = try? Data(contentsOf: url),
+        let limit = 65_536
+        // Open once: metadata and bytes must refer to the same regular file even during atomic replacement.
+        let fd = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard fd >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_size > 0, info.st_size <= limit else { return nil }
+        let stamp = info.st_mtimespec
+        let modified = Date(timeIntervalSince1970: Double(stamp.tv_sec) + Double(stamp.tv_nsec) / 1e9)
+        let age = now.timeIntervalSince(modified)
+        guard age >= 0, age < lifetime,
+              let data = try? handle.read(upToCount: limit + 1), data.count <= limit,
               let value = try? JSONDecoder().decode(CodexStateSnapshot.self, from: data),
               CodexActivityState(token: value.state) != nil else { return nil }
         // Old writers lack eventID: a stable mtime/state identity prevents per-poll replay.
