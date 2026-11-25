@@ -146,7 +146,10 @@ func desktopState(_ controls: [[String: Any]], busy: [[String: Any]] = []) throw
       getAttribute: n => n === 'aria-label' ? (f.label || '') : null,
       getClientRects: () => f.detached ? [] : [1]
     });
-    const document = {querySelectorAll: s => (s.startsWith('[aria-busy') ? fixtures.busy : fixtures.controls).map(element)};
+    const document = {querySelectorAll: s => {
+      const selectors = s.split(',');
+      return (s.startsWith('[aria-busy') ? fixtures.busy : fixtures.controls.filter(f => selectors.includes(f.selector || 'button'))).map(element);
+    }};
     const getComputedStyle = e => ({visibility: e.hidden ? 'hidden' : 'visible', display: 'block'});
     """)
     let result = context.evaluateScript(CodexDesktopObservation.expression)?.toString()
@@ -161,6 +164,17 @@ check((try? desktopState([["label": "停止", "hidden": true]])) == "idle", "hid
 check((try? desktopState([], busy: [["hidden": true]])) == "idle", "hidden busy marker is ignored")
 check((try? desktopState([], busy: [[:]])) == "thinking", "visible busy marker")
 check((try? desktopState([["label": "Stop"], ["text": "Running command"]])) == "command", "running command while busy")
+
+for selector in ["[aria-live]", "[role=\"status\"]", "button"] {
+    check((try? desktopState([["selector": selector, "text": "error"]])) == "idle", "non-alert text is not an error")
+}
+for message in ["Request failed", "网络错误。", "出错了", "Something went wrong!"] {
+    check((try? desktopState([["selector": "[role=\"alert\"]", "text": message]])) == "error", "recognized visible alert")
+}
+for record: [String: Any] in [["text": "Error", "hidden": true], ["text": "No error found"], ["text": String(repeating: "error ", count: 16)]] {
+    var alert = record; alert["selector"] = "[role=\"alert\"]"
+    check((try? desktopState([alert])) == "idle", "hidden, unrecognized or long alert is ignored")
+}
 
 for state in CodexActivityState.allCases {
     var machine = CodexStateMachine()

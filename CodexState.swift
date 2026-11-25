@@ -267,15 +267,20 @@ enum CodexDesktopObservation {
 
     static let expression = """
     (() => {
-      const visible = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
-      const controls = [...document.querySelectorAll('button,[role="button"],[role="status"],[role="alert"],[aria-live]')]
-        .filter(visible)
+      const visible = e => {
+        if (!e.getClientRects().length) return false;
+        const style = getComputedStyle(e);
+        return style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const labels = selector => [...document.querySelectorAll(selector)].filter(visible)
         .flatMap(e => [e.getAttribute('aria-label') || '', e.innerText || ''])
-        .map(t => t.trim()).filter(Boolean);
-      const stop = controls.some(t => /^(停止|中止)(生成|回复|响应|任务|运行)?$|^(Stop|Cancel)( (generating|generation|responding|response|task|turn|thread))?$/i.test(t));
+        .map(t => t.trim()).filter(t => t.length > 0 && t.length <= 40);
+      const buttons = labels('button,[role="button"]');
+      const stop = buttons.some(t => /^(停止|中止)(生成|回复|响应|任务|运行)?$|^(Stop|Cancel)( (generating|generation|responding|response|task|turn|thread))?$/i.test(t));
       const busy = [...document.querySelectorAll('[aria-busy="true"],[data-loading="true"]')].some(visible);
-      const command = controls.some(t => /^(正在运行|Running)(?:\\s|$)/i.test(t));
-      const error = controls.some(t => /失败|出错|错误|failed|error/i.test(t));
+      const command = (stop || busy) && buttons.concat(labels('[role="status"]')).some(t => /^(正在运行|Running)(?:\\s|$)/i.test(t));
+      // Only a short, recognized alert can signal failure; never scan chat/live-region prose.
+      const error = labels('[role="alert"]').some(t => /^(?:(?:(?:网络|连接|请求|任务|操作|生成|执行|加载|未知|发生)(?:发生)?)?(?:失败|错误|出错)(?:了)?|(?:request |connection |network |task |operation |generation |execution )?(?:failed|error)|something went wrong)[.!。！]?$/i.test(t));
       const state = (stop || busy) ? (command ? 'command' : 'thinking') : (error ? 'error' : 'idle');
       return JSON.stringify({state});
     })()
