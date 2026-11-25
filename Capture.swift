@@ -88,19 +88,17 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     var wantsCapture:Bool {requestedScreen != nil}
     var retryPending:Bool {retryTask != nil}
 
-    private func record(_ message:String) {
+    private static let lifecycleLog = CaptureLog(directory: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/Singularity", isDirectory: true))
+    private static let logQueue = DispatchQueue(label: "singularity.capture.lifecycle-log", qos: .utility)
+    private func record(_ message: String) {
         log(message)
-        guard !RunMode.selfTest else{return}
-        // Persist only lifecycle metadata, never frames or window/application titles.
-        let directory=FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Singularity")
-        let file=directory.appendingPathComponent("capture.log")
-        do {
-            try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
-            var data=(try? Data(contentsOf:file)) ?? Data()
-            if data.count > 65_536 {data=Data()}
-            data.append(Data("\(ISO8601DateFormatter().string(from:Date())) \(message)\n".utf8))
-            try data.write(to:file,options:.atomic)
-        } catch {log("CAPTURE_LOG_UNAVAILABLE")}
+        guard !RunMode.selfTest else { return }
+        // Lifecycle metadata only, never pixels, titles or conversation data.
+        Self.logQueue.async {
+            do { try Self.lifecycleLog.append(message) }
+            catch { log("CAPTURE_LOG_UNAVAILABLE") }
+        }
     }
     static func isRecoverable(_ error:Error)->Bool {
         let e=error as NSError

@@ -109,7 +109,7 @@ Schwarzschild 模式沿用上游着色器的数值光线积分。Kerr 及带电�
 
 休眠、显示器睡眠和用户会话切换时暂停采集，相关恢复通知到齐后重新连接。静止桌面的 idle 帧不会被误判为故障。隐藏宠物或显式停止会取消待执行的重连；用户拒绝授权、用户停止、系统明确停止以及未知错误均等待手动开启，不自动弹出授权窗口。
 
-仅采集连接事件、错误域与错误码写入 `~/Library/Logs/Singularity/capture.log`，达到约 64 KB 后重建日志；其中没有屏幕像素、窗口标题或对话内容。显示器热插拔、实际睡眠唤醒和所有系统停止原因无法由单一设备上的故障注入测试穷尽验证。
+仅采集连接事件、错误域与错误码写入 `~/Library/Logs/Singularity/capture.log`，采用异步追加写入，达到约 64 KiB 时保留上一代 `capture.log.1`；其中没有屏幕像素、窗口标题或对话内容。显示器热插拔、实际睡眠唤醒和所有系统停止原因无法由单一设备上的故障注入测试穷尽验证。
 
 ### 性能优化
 
@@ -200,7 +200,7 @@ SINGULARITY_CAPTURE_BACKEND=stream ./scripts/test-native.sh
 
 1.2.8 增加缓存与直接积分的 GPU 逐像素对照，覆盖 72 组六态/风格/尺寸组合（包含最大 1400×1400 Retina 像素）、不同分型/质量、合成桌面和所有几何参数失效；并验证隐藏释放、重叠暂停、恢复后的新桌面画面。`SINGULARITY_DISABLE_GEOMETRY_CACHE=1` 可在显式性能诊断时禁用几何缓存以做同一二进制的 A/B 测量。`--pet-only --self-test --self-test-performance` 运行不保存用户设置的持续 30 FPS 采集测试；设置 `SINGULARITY_BENCHMARK_ALTERNATE=1` 会在同一进程中每 20 秒交替切换几何缓存。测试中的短批次 GPU 计时只用于诊断，不等同于安装版持续运行功耗或风扇测量。
 
-已在 Apple Silicon macOS 上验证逻辑回归、真实 GPU 渲染、屏幕采集和签名。多实体显示器热切换与长时间 GPU 功耗仍需按具体设备实测，目标帧率为 30 FPS。应用使用 Apple Development 签名，未进行 Developer ID 公证。
+1.4.0 在 Apple Silicon macOS 上验证逻辑回归、真实 GPU 上的合成画面渲染、离屏设置界面和签名。本轮未读取真实桌面；历史版本的录屏验证不代表 1.4.0 已完成该项实机验收。多实体显示器热切换与长时间 GPU 功耗仍需按具体设备实测，目标帧率为 30 FPS。应用使用 Apple Development 签名，未进行 Developer ID 公证。
 
 ## 致谢与许可
 

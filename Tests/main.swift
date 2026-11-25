@@ -546,6 +546,22 @@ do {
     bridge.stop()
 }
 
+// Log appends preserve existing lines and retain exactly one rotated generation.
+do {
+    let dir = fixtures.appendingPathComponent("logs")
+    let target = dir.appendingPathComponent("capture.log")
+    let log = CaptureLog(directory: dir, limit: 60)
+    let at = Date(timeIntervalSince1970: 0)
+    try log.append("FIRST", at: at); try log.append("SECOND", at: at)
+    let two = try String(contentsOf: target, encoding: .utf8)
+    expect(two.contains("FIRST") && two.contains("SECOND"), "lifecycle log appends, not replaces")
+    try log.append("THIRD", at: at)
+    expect((try? String(contentsOf: target.appendingPathExtension("1"), encoding: .utf8)) == two, "rotation keeps preceding generation intact")
+    let after = try String(contentsOf: target, encoding: .utf8)
+    expect(after.contains("THIRD") && !after.contains("FIRST"), "new log starts with the triggering event")
+    print("PASS: append-only capture lifecycle log, bounded rotation and retention")
+}
+
 // CLI integration: exercise the real writer only in this run's isolated directory.
 func runCLI(_ state: String, _ detail: String, directory: URL) throws -> (Int32, String) {
     let process = Process()

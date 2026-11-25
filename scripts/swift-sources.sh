@@ -3,6 +3,7 @@ APP_SOURCES=(
     RunMode.swift
     Preferences.swift
     Model.swift
+    CaptureLog.swift
     Capture.swift
     GLProgram.swift
     PetView.swift
