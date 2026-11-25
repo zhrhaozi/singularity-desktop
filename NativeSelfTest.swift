@@ -18,7 +18,7 @@ enum NativeSelfTest {
         if CommandLine.arguments.contains("--self-test-fail") {
             require(false,"intentional failure validates the release test runner")
         }
-        model.codexAuto=false;model.wander=false;model.bodyCount=1
+        model.codexMode = .manual;model.wander=false;model.bodyCount=1
         let oldSize=model.size,oldOrigin=app.pet.frame.origin
         for size in [280.0,440.0,700.0] {
             model.size=size
@@ -134,7 +134,7 @@ enum NativeSelfTest {
     }
 
     @MainActor static func performanceRun(_ app:AppDelegate) {
-        model.codexAuto=false;model.wander=false;model.paused=false
+        model.codexMode = .manual;model.wander=false;model.paused=false
         model.setCodexState(.longTask,source:"performance-test")
         app.pet.ignoresMouseEvents=true
         for menu in [app.status.menu,NSApp.mainMenu?.items.first?.submenu] {
@@ -456,15 +456,15 @@ enum NativeSelfTest {
             }
             func cancel() {}
         }
-        let previous=app.codexBridge,oldAuto=model.codexAuto
+        let previous=app.codexBridge,oldMode=model.codexMode
         let probe=Probe()
         let file=URL(fileURLWithPath:NSTemporaryDirectory()).appendingPathComponent("singularity-no-state-\(UUID())")
         let bridge=CodexStateBridge(model:model,stateFileURL:file,probe:probe)
         defer {
-            bridge.stop();app.codexBridge=previous;model.codexAuto=oldAuto
+            bridge.stop();app.codexBridge=previous;model.codexMode=oldMode
             app.settings.orderOut(nil);app.restartCodexBridge()
         }
-        app.settings.orderOut(nil);model.codexAuto=true;app.codexBridge=bridge
+        app.settings.orderOut(nil);model.codexMode = .desktop;app.codexBridge=bridge
         app.restartCodexBridge()
         require(bridge.isRunning && bridge.hasScheduledTimer,"visible pet starts bridge")
         app.togglePet()
@@ -483,7 +483,7 @@ enum NativeSelfTest {
         app.togglePet()
         require(bridge.isRunning && bridge.hasScheduledTimer,"shown pet resumes bridge")
         await app.suspendActivity(.display)
-        model.codexAuto=false;model.codexAuto=true
+        model.codexMode = .manual;model.codexMode = .desktop
         require(!bridge.isRunning,"auto toggle cannot restart bridge while display suspended")
         await app.resumeActivity(.display)
         require(bridge.isRunning,"display resume restores visible bridge")

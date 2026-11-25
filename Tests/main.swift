@@ -271,7 +271,7 @@ let oldFormat = Data("{\"state\":\"thinking\"}".utf8)
 check((try? JSONDecoder().decode(CodexStateSnapshot.self, from: oldFormat))?.state == "thinking", "optional new fields preserve old format")
 
 final class TestModel: CodexStateModel {
-    var codexAuto = true
+    var codexMode: CodexLinkMode = .desktop // The desktop fixtures below explicitly opt in.
     var codexState: CodexActivityState = .idle
     var codexSource = ""
     var codexDetail = ""
@@ -292,6 +292,26 @@ final class TestProbe: CodexStateProbing {
 }
 func makeBridge(_ model: TestModel, _ probe: TestProbe, _ clock: TestClock, _ file: URL) -> CodexStateBridge {
     CodexStateBridge(model: model, stateFileURL: file, probe: probe, now: { clock.time }, wallNow: { clock.date })
+}
+// File-only and manual modes must never fall through to the desktop reader.
+do {
+    let clock = TestClock(), m = TestModel(), probe = TestProbe()
+    let f = fixtures.appendingPathComponent("file-only/codex-state.json")
+    m.codexMode = .file
+    let bridge = makeBridge(m, probe, clock, f)
+    bridge.start(scheduleTimer: false)
+    check(probe.callbacks.isEmpty && m.codexSource == m.codexMode.waitingLabel, "absent file cannot trigger a network probe")
+    try writeFixture(f, snapshot("thinking"), modified: clock.date)
+    clock.time = 1; bridge.poll()
+    check(m.codexState == .thinking, "file-only mode receives local events")
+    clock.time = 13; bridge.poll()
+    check(probe.callbacks.isEmpty && m.codexState == .idle, "expired file stays offline")
+    m.codexMode = .desktop; bridge.restartIfNeeded(); check(probe.callbacks.count == 1, "only opt-in starts a reader")
+    m.codexMode = .file; bridge.restartIfNeeded(); probe.succeed(0, snapshot("error"))
+    check(m.codexState == .idle && m.codexPulse == 0, "revocation rejects stale desktop results")
+    m.codexMode = .manual; bridge.restartIfNeeded()
+    check(!bridge.isRunning && m.codexSource == "手动预览", "manual selection stops observation")
+    bridge.stop()
 }
 // Fresh file priority, explicit complete, hold, expiration, and no replay across stop/start.
 do {
@@ -380,7 +400,7 @@ do {
     probe.succeed(1, snapshot("thinking"))
     check(m.codexState == .thinking, "current response accepted")
     c.time = 1; bridge.poll()
-    m.codexAuto = false; m.codexState = .command
+    m.codexMode = .manual; m.codexState = .command
     probe.succeed(2, snapshot("complete", "auto-off"))
     check(m.codexState == .command && m.codexPulse == 0, "auto off rejects pending result")
     bridge.stop()
@@ -483,7 +503,7 @@ do {
     cancelled.start(scheduleTimer: false)
     check(m.codexState == .complete && stopped.codexState == .complete, "real deadlines begin with completion")
     cancelled.stop()
-    stopped.codexAuto = false
+    stopped.codexMode = .manual
     stopped.setCodexState(.command, source: "手动预览", detail: "keep manual state")
     stopped.codexPulse = 0
     let end = Date().addingTimeInterval(CodexStateMachine.completionHold + 0.3)

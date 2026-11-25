@@ -27,7 +27,7 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var travelSpeed = UserDefaults.standard.object(forKey:"travelSpeed") as? Double ?? 35 {didSet{save()}}
     @Published var customColor = UserDefaults.standard.bool(forKey:"customColor") {didSet{save()}}
     @Published var colorHex = UserDefaults.standard.string(forKey:"colorHex") ?? "#FFAA55" {didSet{save()}}
-    @Published var codexAuto = UserDefaults.standard.object(forKey:"codexAuto") as? Bool ?? true { didSet { save(); appDelegate?.restartCodexBridge() } }
+    @Published var codexMode = CodexLinkMode.restored(from: .standard) { didSet { save(); appDelegate?.restartCodexBridge() } }
     @Published var backgroundFPS = CaptureCadence.normalized(UserDefaults.standard.integer(forKey:"backgroundFPS")) {
         didSet {
             guard !RunMode.selfTest else{return}
@@ -36,7 +36,7 @@ final class Model: ObservableObject, CodexStateModel {
         }
     }
     @Published var codexState: CodexActivityState = .idle
-    @Published var codexSource = "等待 Codex 桌面状态"
+    @Published var codexSource = CodexLinkMode.restored(from: .standard).waitingLabel
     @Published var codexDetail = ""
     @Published var codexPulse: Double = 0
     var hasSpin:Bool {kind==1 || kind==3}
@@ -47,7 +47,7 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var captureState = "尚未开启桌面透镜"
     @Published var capturing = false
     @Published var error = ""
-    func save() { guard !RunMode.selfTest else {return};appDelegate?.view?.needsDisplay=true;let d=UserDefaults.standard; d.set(size,forKey:"size");d.set(bodyCount,forKey:"bodyCount");d.set(orbitSpeed,forKey:"orbitSpeed");d.set(systemDrift,forKey:"systemDrift");d.set(lens,forKey:"lens");d.set(speed,forKey:"speed");d.set(brightness,forKey:"brightness");d.set(tilt,forKey:"tilt");d.set(roll,forKey:"roll");d.set(style,forKey:"style");d.set(kind,forKey:"kind");d.set(spin,forKey:"spin");d.set(charge,forKey:"charge");d.set(mass,forKey:"mass");d.set(wander,forKey:"wander");d.set(travelSpeed,forKey:"travelSpeed");d.set(customColor,forKey:"customColor");d.set(colorHex,forKey:"colorHex");d.set(codexAuto,forKey:"codexAuto") }
+    func save() { guard !RunMode.selfTest else {return};appDelegate?.view?.needsDisplay=true;let d=UserDefaults.standard; d.set(size,forKey:"size");d.set(bodyCount,forKey:"bodyCount");d.set(orbitSpeed,forKey:"orbitSpeed");d.set(systemDrift,forKey:"systemDrift");d.set(lens,forKey:"lens");d.set(speed,forKey:"speed");d.set(brightness,forKey:"brightness");d.set(tilt,forKey:"tilt");d.set(roll,forKey:"roll");d.set(style,forKey:"style");d.set(kind,forKey:"kind");d.set(spin,forKey:"spin");d.set(charge,forKey:"charge");d.set(mass,forKey:"mass");d.set(wander,forKey:"wander");d.set(travelSpeed,forKey:"travelSpeed");d.set(customColor,forKey:"customColor");d.set(colorHex,forKey:"colorHex");d.set(codexMode.rawValue,forKey:"codexLinkMode") }
     func setCodexState(_ next:CodexActivityState,_ source:String,_ detail:String="") {
         let changed = codexState != next
         codexState = next
@@ -57,5 +57,5 @@ final class Model: ObservableObject, CodexStateModel {
         if changed && (next == .complete || next == .error) { codexPulse = 1.0 }
     }
     func setCodexState(_ next:CodexActivityState, source:String, detail:String="") { setCodexState(next, source, detail) }
-    func reset() { bodyCount=1;orbitSpeed=0.65;systemDrift=true;size=440;lens=13;speed=0.6;brightness=2.2;tilt=1.48;roll=0.18;style=0;kind=0;spin=0.7;charge=0.5;mass=1;wander=false;travelSpeed=35;customColor=false;colorHex="#FFAA55";codexAuto=true;backgroundFPS=10;setCodexState(.idle, source:"等待 Codex 桌面状态");appDelegate?.centerPet() }
+    func reset() { bodyCount=1;orbitSpeed=0.65;systemDrift=true;size=440;lens=13;speed=0.6;brightness=2.2;tilt=1.48;roll=0.18;style=0;kind=0;spin=0.7;charge=0.5;mass=1;wander=false;travelSpeed=35;customColor=false;colorHex="#FFAA55";codexMode = .file;backgroundFPS=10;setCodexState(.idle, source:codexMode.waitingLabel);appDelegate?.centerPet() }
 }

@@ -5,6 +5,7 @@ struct SettingsView:View {
     @ObservedObject var state:Model
     @State private var hexInput=""
     @State private var colorError=""
+    @State private var confirmDesktop = false
     var chosenColor:Binding<Color> {Binding(get:{let c=RGB(hex:state.colorHex)!;return Color(.sRGB,red:c.r,green:c.g,blue:c.b)},set:{c in
         if let n=NSColor(c).usingColorSpace(.sRGB){let h=String(format:"#%02X%02X%02X",Int((n.redComponent*255).rounded()),Int((n.greenComponent*255).rounded()),Int((n.blueComponent*255).rounded()));state.colorHex=h;hexInput=h;colorError=""}
     })}
@@ -46,15 +47,24 @@ struct SettingsView:View {
             }
             VStack(alignment:.leading,spacing:11){
                 HStack{Text("Codex 状态联动").font(.headline);Spacer();Text(state.codexState.label).font(.system(size:11,design:.monospaced)).foregroundStyle(accent)}
-                Toggle("自动检测 Codex 桌面状态",isOn:$state.codexAuto).tint(accent)
-                if !state.codexAuto {
+                Picker("状态来源", selection: Binding(get: { state.codexMode }, set: { mode in
+                    if mode == .desktop { confirmDesktop = true } else { state.codexMode = mode }
+                })) {
+                    Text("文件桥接（推荐）").tag(CodexLinkMode.file)
+                    Text("手动预览").tag(CodexLinkMode.manual)
+                    Text("桌面调试（实验）").tag(CodexLinkMode.desktop)
+                }.alert("启用实验性桌面联动？", isPresented: $confirmDesktop) {
+                    Button("取消", role: .cancel) {}
+                    Button("启用") { state.codexMode = .desktop }
+                } message: { Text("调试端口可能允许其他本机进程访问 Codex。文件桥接不需要端口。奇点不会为你打开端口。") }
+                if state.codexMode == .manual {
                     Picker("预览状态",selection:Binding(get:{state.codexState.rawValue},set:{raw in if let next=CodexActivityState(rawValue:raw){state.setCodexState(next,source:"手动预览",detail:"")}})) {
                         ForEach(CodexActivityState.allCases,id:\.rawValue){item in Text(item.label).tag(item.rawValue)}
                     }
                 }
                 Text("来源：\(state.codexSource)").font(.system(size:11)).foregroundStyle(.secondary)
                 if !state.codexDetail.isEmpty {Text(state.codexDetail).font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary).lineLimit(2)}
-                Text("自动模式通过本机 Codex 渲染器状态判断；无法连接时保持空闲，不读取对话内容。").font(.system(size:11)).foregroundStyle(.secondary)
+                Text(state.codexMode == .desktop ? "仅在没有新鲜状态文件时尝试已启用的本机调试端点。" : (state.codexMode == .file ? "只读取本地状态文件，不连接调试端口。" : "手动选择状态，不读取外部状态。")).font(.system(size:11)).foregroundStyle(.secondary)
             }.padding(14).background(Color.white.opacity(0.035),in:RoundedRectangle(cornerRadius:10))
             VStack(alignment:.leading,spacing:13){
                 Text("黑洞分型").font(.headline)

@@ -211,13 +211,37 @@ struct CodexStateFile {
     }
 }
 
+enum CodexLinkMode: String, CaseIterable {
+    case file, manual, desktop
+
+    static func restored(from defaults: UserDefaults) -> Self {
+        if let value = defaults.string(forKey: "codexLinkMode") {
+            return Self(rawValue: value) ?? .file
+        }
+        // The old automatic switch was on by default. It is not consent to a debug connection.
+        return (defaults.object(forKey: "codexAuto") as? Bool) == false ? .manual : .file
+    }
+
+    var waitingLabel: String {
+        switch self {
+        case .file: return "等待本地状态文件"
+        case .desktop: return "等待 Codex 桌面状态"
+        case .manual: return "手动预览"
+        }
+    }
+}
+
 protocol CodexStateModel: AnyObject {
-    var codexAuto: Bool { get }
+    var codexMode: CodexLinkMode { get }
     var codexState: CodexActivityState { get }
     var codexSource: String { get }
     var codexDetail: String { get }
     var codexPulse: Double { get set }
     func setCodexState(_ next: CodexActivityState, source: String, detail: String)
+}
+
+extension CodexStateModel {
+    var monitorsCodex: Bool { codexMode != .manual }
 }
 
 /// Completion callbacks are delivered on the main thread. Tests inject a local fake.
@@ -441,7 +465,8 @@ final class CodexDesktopProbe: CodexStateProbing {
 /// Main-thread coordinator. A fresh file always wins, even if it appears during a probe.
 final class CodexStateBridge {
     private weak var model: CodexStateModel?
-    private let probe: CodexStateProbing
+    private var probe: CodexStateProbing?
+    private var observedMode: CodexLinkMode?
     private let stateFileURL: URL
     private let now: () -> TimeInterval
     private let wallNow: () -> Date
@@ -461,7 +486,7 @@ final class CodexStateBridge {
     var hasScheduledTimer: Bool { timer != nil }
 
     init(model: CodexStateModel, stateFileURL: URL? = nil,
-         probe: CodexStateProbing = CodexDesktopProbe(),
+         probe: CodexStateProbing? = nil,
          now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          wallNow: @escaping () -> Date = { Date() }) {
         self.model = model
@@ -484,8 +509,9 @@ final class CodexStateBridge {
 
     func resume(scheduleTimer: Bool = true) {
         precondition(Thread.isMainThread)
+        guard let model, model.monitorsCodex else { return }
+        if observedMode != model.codexMode { stop(); observedMode = model.codexMode }
         guard !running else { return }
-        guard model?.codexAuto == true else { return }
         if observationPaused { machine.resumeObservation(now: now()) }
         observationPaused = false
         running = true
@@ -520,13 +546,15 @@ final class CodexStateBridge {
     }
 
     func restartIfNeeded(active: Bool = true) {
-        if model?.codexAuto == true {
-            if active { resume() } else { pause() }
-        }
-        else {
+        guard let model else { stop(); return }
+        if observedMode != model.codexMode {
             stop()
-            if let model { model.setCodexState(model.codexState, source: "手动预览", detail: model.codexDetail) }
+            observedMode = model.codexMode
+            model.codexPulse = 0
+            model.setCodexState(.idle, source: model.codexMode.waitingLabel, detail: "")
         }
+        guard model.monitorsCodex else { return }
+        if active { resume() } else { pause() }
     }
 
     func refresh() {
@@ -539,7 +567,7 @@ final class CodexStateBridge {
 
     func poll() {
         precondition(Thread.isMainThread)
-        guard running, model?.codexAuto == true else { return }
+        guard running, model?.monitorsCodex == true else { return }
         let time = now()
         guard time - lastPoll >= 0.35 else { return }
         lastPoll = time
@@ -548,7 +576,10 @@ final class CodexStateBridge {
         // Expired file ownership is released immediately, without fabricating success.
         if machine.observationSource == .file { machine.unavailable() }
         publish()
-        guard inFlight == nil, time >= nextProbeAt else { return }
+        guard model?.codexMode == .desktop, inFlight == nil, time >= nextProbeAt else { return }
+        // Instantiate the legacy reader only after explicit opt-in, never in file/manual mode.
+        let probe = self.probe ?? CodexDesktopProbe()
+        self.probe = probe
         generation &+= 1
         let token = generation
         inFlight = token
@@ -560,7 +591,7 @@ final class CodexStateBridge {
     private func cancelProbe() {
         generation &+= 1
         inFlight = nil
-        probe.cancel()
+        probe?.cancel()
     }
 
     private func acceptFreshFile() -> Bool {
@@ -574,7 +605,7 @@ final class CodexStateBridge {
 
     private func handle(_ result: Result<CodexStateSnapshot, Error>, token: UInt64) {
         precondition(Thread.isMainThread)
-        guard running, model?.codexAuto == true, inFlight == token, generation == token else { return }
+        guard running, model?.codexMode == .desktop, inFlight == token, generation == token else { return }
         // Recheck priority now, not just when the HTTP request began.
         if acceptFreshFile() { return }
         inFlight = nil
@@ -595,9 +626,10 @@ final class CodexStateBridge {
     }
 
     private func publish() {
-        guard running, let model, model.codexAuto else { return }
-        if model.codexState != machine.state || model.codexSource != machine.source || model.codexDetail != machine.detail {
-            model.setCodexState(machine.state, source: machine.source, detail: machine.detail)
+        guard running, let model, model.monitorsCodex else { return }
+        let source = machine.observationSource == nil ? model.codexMode.waitingLabel : machine.source
+        if model.codexState != machine.state || model.codexSource != source || model.codexDetail != machine.detail {
+            model.setCodexState(machine.state, source: source, detail: machine.detail)
         }
         if machine.resultSerial != lastDeliveredResult {
             lastDeliveredResult = machine.resultSerial
@@ -608,7 +640,7 @@ final class CodexStateBridge {
         scheduledDeadline = machine.completionDeadline
         if let end = machine.completionDeadline {
             let work = DispatchWorkItem { [weak self] in
-                guard let self, self.running, self.model?.codexAuto == true else { return }
+                guard let self, self.running, self.model?.monitorsCodex == true else { return }
                 self.scheduledDeadline = nil
                 self.machine.advance(now: self.now())
                 self.publish()
@@ -621,6 +653,6 @@ final class CodexStateBridge {
     deinit {
         timer?.invalidate()
         settleWork?.cancel()
-        probe.cancel()
+        probe?.cancel()
     }
 }
