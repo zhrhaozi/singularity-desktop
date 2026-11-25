@@ -41,7 +41,15 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         let size=model.sceneSize
         pet=PetWindow(contentRect:NSRect(x:500,y:300,width:size,height:size),styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         pet.title="奇点桌面宠物";pet.isOpaque=false;pet.backgroundColor = .clear;pet.hasShadow=false;pet.level = .floating;pet.hidesOnDeactivate=false;pet.collectionBehavior=[.canJoinAllSpaces,.fullScreenAuxiliary];pet.isReleasedWhenClosed=false
-        view=PetView(frame:pet.contentView!.bounds,capture:capture);view.autoresizingMask=[.width,.height];pet.contentView=view
+        guard let renderer = PetView(frame: NSRect(x: 0, y: 0, width: size, height: size), capture: capture) else {
+            log("GL_PIXEL_FORMAT_UNAVAILABLE")
+            if RunMode.selfTest { exit(1) }
+            let alert = NSAlert()
+            alert.messageText = "当前图形环境无法显示黑洞"
+            alert.informativeText = "没有可用的 OpenGL 像素格式。奇点没有启动桌面采集，也不会更改设置。"
+            alert.runModal(); NSApp.terminate(nil); return
+        }
+        view = renderer; view.autoresizingMask = [.width, .height]; pet.contentView = view
         let prefs = PreferenceReader(defaults: RunMode.selfTest ? nil : .standard)
         let savedX = prefs.coordinate("x"), savedY = prefs.coordinate("y")
         if let screen=NSScreen.main {pet.setFrameOrigin(NSPoint(x:screen.visibleFrame.minX+screen.visibleFrame.width*0.78-size/2,y:screen.visibleFrame.midY-size/2))}
@@ -142,7 +150,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         frame.origin=PetPlacement.recoveredOrigin(for:frame,screens:petScreens)
         pet.setFrame(frame,display:true);savePosition();checkScreen()
     }
-    func savePosition(){guard pet != nil,!RunMode.selfTest else{return};UserDefaults.standard.set(pet.frame.minX,forKey:"x");UserDefaults.standard.set(pet.frame.minY,forKey:"y")}
+    func savePosition(){guard view != nil,pet != nil,!RunMode.selfTest else{return};UserDefaults.standard.set(pet.frame.minX,forKey:"x");UserDefaults.standard.set(pet.frame.minY,forKey:"y")}
     var petScreens:[PetScreen] {NSScreen.screens.map{PetScreen(frame:$0.frame,visibleFrame:$0.visibleFrame)}}
     func screenParametersChanged(){
         guard pet != nil else{return}
@@ -152,7 +160,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         }
         checkScreen()
     }
-    func enableCapture(requestPermission:Bool=true,retryPreferredBackend:Bool=false){guard model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen,requestPermission:requestPermission,retryPreferredBackend:retryPreferredBackend)}}
+    func enableCapture(requestPermission:Bool=true,retryPreferredBackend:Bool=false){guard model.rendererError.isEmpty,model.visible,let screen=pet.screen ?? NSScreen.main else{return};model.captureState="正在连接桌面…";Task{@MainActor in await capture.start(screen:screen,requestPermission:requestPermission,retryPreferredBackend:retryPreferredBackend)}}
     func restartCodexBridge(settingsVisible:Bool?=nil){
         let settingsActive=settingsVisible ?? (settings?.isVisible==true && settings?.isMiniaturized==false)
         if idleReasons.isEmpty {codexBridge?.restartIfNeeded(active:model.visible || settingsActive)}

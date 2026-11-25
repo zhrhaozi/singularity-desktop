@@ -10,6 +10,21 @@ enum NativeSelfTest {
         }
     }
 
+    private static func shaderFailureChecks() {
+        do { _ = try GLProgram.source("missing-self-test-resource", "frag"); require(false, "missing shader accepted") }
+        catch GLProgram.Failure.resource { } catch { require(false, "wrong missing resource classification") }
+        let vertex = "#version 150\nout vec3 uv; void main(){ uv=vec3(1); gl_Position=vec4(0,0,0,1); }"
+        func rejected(_ fragment: String, link: Bool) -> Bool {
+            do { let id = try GLProgram.build(vertex: vertex, fragment: fragment); glDeleteProgram(id); return false }
+            catch GLProgram.Failure.link { return link }
+            catch GLProgram.Failure.compile { return !link }
+            catch { return false }
+        }
+        require(rejected("#version 150\ninvalid shader", link: false), "invalid shader must not return a handle")
+        require(rejected("#version 150\nin vec2 uv; out vec4 c; void main(){ c=vec4(uv,0,1); }", link: true), "mismatched shaders must not return an unlinked program")
+        log("SHADER_FAILURE_TEST_PASS missing-resource compile-error link-error")
+    }
+
     @MainActor static func run(_ app:AppDelegate) {
         if RunMode.performance {
             performanceRun(app)
@@ -47,6 +62,7 @@ enum NativeSelfTest {
         var linked:GLint=0
         glGetProgramiv(app.view.program,GLenum(GL_LINK_STATUS),&linked)
         require(linked==1,"GL link status")
+        shaderFailureChecks()
         renderChecks(app.view)
         multiBodyRenderChecks(app.view)
         recoveryPolicyChecks()

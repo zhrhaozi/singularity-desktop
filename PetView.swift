@@ -93,13 +93,15 @@ final class PetView:NSOpenGLView {
     var lastTick=ProcessInfo.processInfo.systemUptime
     var lastSave=ProcessInfo.processInfo.systemUptime
     let capture:Capture
-    init(frame:NSRect,capture:Capture) {
+    init?(frame:NSRect,capture:Capture) {
         self.capture=capture
         let attrs:[NSOpenGLPixelFormatAttribute]=[UInt32(NSOpenGLPFAOpenGLProfile),UInt32(NSOpenGLProfileVersion3_2Core),UInt32(NSOpenGLPFAAccelerated),UInt32(NSOpenGLPFADoubleBuffer),UInt32(NSOpenGLPFAColorSize),24,UInt32(NSOpenGLPFAAlphaSize),8,0]
-        super.init(frame:frame,pixelFormat:NSOpenGLPixelFormat(attributes:attrs)!)!
+        guard let format = NSOpenGLPixelFormat(attributes: attrs) ?? NSOpenGLPixelFormat(attributes: attrs.filter { $0 != UInt32(NSOpenGLPFAAccelerated) }) else { return nil }
+        super.init(frame: frame, pixelFormat: format)
+        setAccessibilityLabel("奇点黑洞桌宠")
         wantsBestResolutionOpenGLSurface=true
     }
-    required init?(coder:NSCoder) {fatalError()}
+    required init?(coder:NSCoder) { return nil }
     override var isOpaque:Bool {false}
     override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
     override func prepareOpenGL() {
@@ -107,30 +109,26 @@ final class PetView:NSOpenGLView {
         if model.bodyCount > 1 {resetOrbits()}
         var opaque:GLint=0;openGLContext?.setValues(&opaque,for:.surfaceOpacity)
         var swap:GLint=1;openGLContext?.setValues(&swap,for:.swapInterval)
-        func compile(_ type:GLenum,_ source:String)->GLuint {
-            let shader=glCreateShader(type)
-            source.withCString {p in var ptr:UnsafePointer<GLchar>?=p;glShaderSource(shader,1,&ptr,nil)}
-            glCompileShader(shader);var ok:GLint=0;glGetShaderiv(shader,GLenum(GL_COMPILE_STATUS),&ok)
-            if ok==0 {var info=[GLchar](repeating:0,count:16384);glGetShaderInfoLog(shader,16384,nil,&info);log("SHADER_ERROR \(String(cString:info))");model.error="图形渲染初始化失败"}
-            return shader
+        do {
+            let vertex = try GLProgram.source("blackhole", "vert")
+            let source = try GLProgram.source("blackhole", "frag")
+            program = try GLProgram.build(vertex: vertex, fragment: source)
+            log("GL_LINK 1")
+            do {
+                let cached = source.replacingOccurrences(of: "#version 150", with: "#version 150\n#define GEOMETRY_PASS")
+                let id = try GLProgram.build(vertex: vertex, fragment: cached,
+                                             outputs: ["geometryBackground", "geometryCrossing0", "geometryCrossing1"])
+                geometryCache = LensGeometryCache(program: id)
+            } catch { log("GEOMETRY_CACHE_UNAVAILABLE \(error)") } // Direct rendering remains usable.
+        } catch {
+            program = 0
+            timer?.invalidate(); timer = nil
+            log("GL_INIT_FAILED \(error)")
+            model.rendererError = "图形渲染未能启动。请重新打开奇点；如果仍然失败，请使用完整的应用包重新安装。"
+            Task { @MainActor in await capture.start(screen: nil) }
+            return
         }
-        let vertex=compile(GLenum(GL_VERTEX_SHADER),try! String(contentsOf:Bundle.main.url(forResource:"blackhole",withExtension:"vert")!,encoding:.utf8))
-        let source=try! String(contentsOf:Bundle.main.url(forResource:"blackhole",withExtension:"frag")!,encoding:.utf8)
-        let fragment=compile(GLenum(GL_FRAGMENT_SHADER),source)
-        program=glCreateProgram();glAttachShader(program,vertex);glAttachShader(program,fragment);glLinkProgram(program)
-        var ok:GLint=0;glGetProgramiv(program,GLenum(GL_LINK_STATUS),&ok);log("GL_LINK \(ok)")
-        let geometryFragment=compile(GLenum(GL_FRAGMENT_SHADER),source.replacingOccurrences(of:"#version 150",with:"#version 150\n#define GEOMETRY_PASS"))
-        let geometryProgram=glCreateProgram()
-        glAttachShader(geometryProgram,vertex);glAttachShader(geometryProgram,geometryFragment)
-        for (i,name) in ["geometryBackground","geometryCrossing0","geometryCrossing1"].enumerated() {
-            glBindFragDataLocation(geometryProgram,GLuint(i),name)
-        }
-        glLinkProgram(geometryProgram)
-        var geometryOK:GLint=0;glGetProgramiv(geometryProgram,GLenum(GL_LINK_STATUS),&geometryOK)
-        if geometryOK==1 {geometryCache=LensGeometryCache(program:geometryProgram)}
-        else {glDeleteProgram(geometryProgram);log("GEOMETRY_CACHE_LINK_FAILED")}
-        glDeleteShader(geometryFragment)
-        glDeleteShader(vertex);glDeleteShader(fragment);glGenVertexArrays(1,&vao);glBindVertexArray(vao)
+        glGenVertexArrays(1,&vao);glBindVertexArray(vao)
         cacheUniformLocations()
         if let context=openGLContext?.cglContextObj,let format=pixelFormat?.cglPixelFormatObj {
             let result=CVOpenGLTextureCacheCreate(kCFAllocatorDefault,nil,context,format,nil,&desktopCache)
