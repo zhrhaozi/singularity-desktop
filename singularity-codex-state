@@ -7,6 +7,15 @@ STATE_FILE="$STATE_DIR/codex-state.json"
 STATE="${1:-idle}"
 DETAIL="${2:-}"
 
+# Codex CLI passes the event JSON as one argument. Inspect only its type; never
+# forward the event payload, conversation text, working directory or IDs to the state file.
+if [[ "$STATE" == --codex-notify ]]; then
+  event_type="$(printf '%s' "$DETAIL" | /usr/bin/plutil -extract type raw -expect string -o - - 2>/dev/null)" || exit 0
+  [[ "$event_type" == agent-turn-complete ]] || exit 0
+  STATE=complete
+  DETAIL='Codex 回合结束'
+fi
+
 case "$STATE" in
   idle|thinking|command|long|complete|error) ;;
   *)

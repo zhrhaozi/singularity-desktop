@@ -581,6 +581,17 @@ let invalidResult = try runCLI("unknown", "", directory: cliDirectory)
 check(invalidResult.0 == 2, "CLI rejects unknown state")
 let afterInvalid = try Data(contentsOf: cliFile)
 check(afterInvalid == beforeInvalid, "invalid CLI input preserves prior state")
+let notifyPayload = #"{"type":"agent-turn-complete","last-assistant-message":"FAKE_PRIVATE_CONTENT","cwd":"/fake-private-path"}"#
+let notification = try runCLI("--codex-notify", notifyPayload, directory: cliDirectory)
+let notifiedData = try Data(contentsOf: cliFile)
+let notified = try JSONDecoder().decode(CodexStateSnapshot.self, from: notifiedData)
+check(notification.0 == 0 && notified.state == "complete" && notified.detail == "Codex 回合结束", "turn-complete notification mapped to a local result")
+check(!String(decoding: notifiedData, as: UTF8.self).contains("PRIVATE") && !String(decoding: notifiedData, as: UTF8.self).contains("fake-private-path"), "notification body and paths never reach the state file")
+for other in [#"{"type":"not-supported"}"#, "malformed"] {
+    let result = try runCLI("--codex-notify", other, directory: cliDirectory)
+    let current = try Data(contentsOf: cliFile)
+    check(result.0 == 0 && current == notifiedData, "unknown/invalid notifications do not alter prior state")
+}
 let permissions = (try FileManager.default.attributesOfItem(atPath: cliFile.path)[.posixPermissions] as? NSNumber)?.intValue ?? 0
 check(permissions & 0o077 == 0, "state file is private to current user")
 print("PASS: \(codexChecks) Codex assertions (state machine, deadlines, replay, expiry, cancellation, source priority, JSON CLI)")
