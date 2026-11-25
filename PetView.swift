@@ -377,7 +377,7 @@ final class PetView:NSOpenGLView {
         set1f(uniforms.codexEnergy,model.codexState.energy);set1f(uniforms.codexTrail,model.codexState.trail);set1f(uniforms.codexParticles,model.codexState.particleDensity);set1f(uniforms.codexPulse,Float(model.codexPulse));set1i(uniforms.codexState,GLint(model.codexState.rawValue))
         let bodyPhase=bodyPass.map{diskPhase*($0.index==1 ? -0.85:1.0)+Float($0.index)*2.1} ?? diskPhase
         set1f(uniforms.codexEnergySmooth,codexEnergySmooth);set1f(uniforms.codexTrailSmooth,codexTrailSmooth);set1f(uniforms.codexParticlesSmooth,codexParticlesSmooth);set1f(uniforms.diskPhase,bodyPhase);set1f(uniforms.dustPhase,dustPhase)
-        let rgb=RGB(hex:model.colorHex) ?? RGB(hex:"#FFAA55")!
+        let rgb = model.customRGB
         set3f(uniforms.customRGB,Float(rgb.r),Float(rgb.g),Float(rgb.b))
         set1i(uniforms.useCustomColor,model.customColor ? 1:0)
         set1i(uniforms.style,GLint(model.style));set1i(uniforms.hasCapture,useCapture && uploaded != nil && model.capturing ? 1:0)

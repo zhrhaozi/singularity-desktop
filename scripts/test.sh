@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 BUILD_DIR="${SINGULARITY_TEST_BUILD_DIR:-$PWD/.build}"
 mkdir -p "$BUILD_DIR"
 FIXTURES="$(mktemp -d "$BUILD_DIR/codex-fixtures.XXXXXX")"
-swiftc -swift-version 5 -module-cache-path "$BUILD_DIR/module-cache" Behavior.swift CodexState.swift Tests/main.swift -o "$BUILD_DIR/behavior-tests"
+swiftc -swift-version 5 -module-cache-path "$BUILD_DIR/module-cache" Behavior.swift CodexState.swift Preferences.swift Model.swift Tests/main.swift -o "$BUILD_DIR/behavior-tests"
 "$BUILD_DIR/behavior-tests" "$FIXTURES" "$PWD/singularity-codex-state"
 
 SHADER="$PWD/Resources/blackhole.frag"

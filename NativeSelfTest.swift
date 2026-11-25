@@ -22,6 +22,7 @@ enum NativeSelfTest {
         let oldSize=model.size,oldOrigin=app.pet.frame.origin
         for size in [280.0,440.0,700.0] {
             model.size=size
+            RunLoop.main.run(until: Date().addingTimeInterval(0.20))
             require(abs(app.pet.frame.width-size)<1,"resize \(size)")
         }
         if let screen=app.pet.screen ?? NSScreen.main {
@@ -33,6 +34,7 @@ enum NativeSelfTest {
             model.bodyCount=1
         }
         model.size=oldSize
+        app.resizePet()
         app.pet.setFrameOrigin(NSPoint(x:oldOrigin.x+30,y:oldOrigin.y+20))
         require(abs(app.pet.frame.minX-oldOrigin.x-30)<1,"position")
         let moved=app.pet.frame

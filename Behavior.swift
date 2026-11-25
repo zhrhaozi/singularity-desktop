@@ -78,6 +78,8 @@ enum PetPlacement {
 
 struct RGB: Equatable {
     let r: Double, g: Double, b: Double
+    static let amber = RGB(r: 1, g: 170.0 / 255, b: 85.0 / 255)
+    private init(r: Double, g: Double, b: Double) { self.r = r; self.g = g; self.b = b }
     init?(hex: String) {
         var text=hex.trimmingCharacters(in:.whitespacesAndNewlines)
         if text.hasPrefix("#") {text.removeFirst()}

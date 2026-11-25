@@ -5,6 +5,38 @@ func expect(_ condition:Bool,_ name:String){if !condition{fatalError(name)}}
 expect(RGB(hex:"#8a5cff")!.hex=="#8A5CFF","six digit")
 expect(RGB(hex:"abc")!.hex=="#AABBCC","short hex")
 expect(RGB(hex:"#GG0011")==nil && RGB(hex:"12345")==nil,"reject invalid")
+// Isolated domains only: do not touch the installed app's preferences.
+do {
+    let suite = "Singularity.SettingsTests." + UUID().uuidString
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let fresh = Model(defaults: defaults)
+    expect(fresh.codexMode == .file && fresh.size == 440, "fresh install is offline and usable")
+    fresh.lens = 17; fresh.lens = 18; fresh.brightness = 2.7
+    expect(defaults.object(forKey: "lens") == nil, "drag is not a synchronous defaults write")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.25))
+    expect(defaults.double(forKey: "lens") == 18 && defaults.double(forKey: "brightness") == 2.7, "debounce persists final values")
+    expect(Set(defaults.persistentDomain(forName: suite)!.keys) == Set(["lens", "brightness"]), "only changed keys were persisted")
+    defaults.set(true, forKey: "codexAuto")
+    for (key, val): (String, Any) in [("size", 0), ("brightness", Double.nan), ("speed", Double.infinity), ("tilt", "garbage"), ("lens", -1), ("charge", -1), ("roll", true), ("orbitSpeed", 3), ("style", -1), ("kind", 1.5), ("bodyCount", 300), ("colorHex", "invalid"), ("backgroundFPS", 7), ("x", Double.infinity)] {
+        defaults.set(val, forKey: key)
+    }
+    let repaired = Model(defaults: defaults)
+    expect(repaired.size == 440 && repaired.brightness == 2.2 && repaired.speed == 0.6 && repaired.tilt == 1.48 && repaired.lens == 13, "unsafe floats restore defaults")
+    expect(repaired.roll == 0.18 && repaired.charge == 0.5 && repaired.orbitSpeed == 0.65, "reject booleans and invalid parameters in numeric fields")
+    expect(repaired.style == 0 && repaired.kind == 0 && repaired.bodyCount == 1 && repaired.backgroundFPS == 10, "invalid choices restore defaults")
+    expect(repaired.colorHex == "#FFAA55" && repaired.customRGB == .amber && repaired.codexMode == .file, "old auto-on is not desktop consent")
+    expect(PreferenceReader(defaults: defaults).coordinate("x") == nil, "unsafe window position rejected")
+    repaired.colorHex = "abc"; repaired.colorHex = "bad-color"
+    expect(repaired.colorHex == "#AABBCC" && repaired.customRGB.hex == "#AABBCC", "color is normalized, cached and retained on invalid input")
+    defaults.set(false, forKey: "codexAuto")
+    expect(Model(defaults: defaults).codexMode == .manual, "old manual users stay manual")
+    repaired.codexMode = .desktop; repaired.flushPreferences()
+    expect(Model(defaults: defaults).codexMode == .desktop, "explicit new source choice persists")
+    repaired.reset(); repaired.flushPreferences()
+    expect(Model(defaults: defaults).codexMode == .file && repaired.customRGB == .amber, "reset restores safe source and color")
+    print("PASS: preference validation, legacy migration, RGB cache, isolated per-key writes and reset")
+}
 let screen=CGRect(x:-1600,y:50,width:1600,height:1000)
 for angle in stride(from:0.0,to:6.28,by:0.4){
  var w=Wander(heading:angle,turnIn:100)

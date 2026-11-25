@@ -6,7 +6,7 @@ struct SettingsView:View {
     @State private var hexInput=""
     @State private var colorError=""
     @State private var confirmDesktop = false
-    var chosenColor:Binding<Color> {Binding(get:{let c=RGB(hex:state.colorHex)!;return Color(.sRGB,red:c.r,green:c.g,blue:c.b)},set:{c in
+    var chosenColor:Binding<Color> {Binding(get:{let c=state.customRGB;return Color(.sRGB,red:c.r,green:c.g,blue:c.b)},set:{c in
         if let n=NSColor(c).usingColorSpace(.sRGB){let h=String(format:"#%02X%02X%02X",Int((n.redComponent*255).rounded()),Int((n.greenComponent*255).rounded()),Int((n.blueComponent*255).rounded()));state.colorHex=h;hexInput=h;colorError=""}
     })}
     func applyHex(){if let rgb=RGB(hex:hexInput){state.colorHex=rgb.hex;hexInput=rgb.hex;colorError=""}else{colorError="请输入 #RRGGBB 或 #RGB，例如 #8A5CFF"}}
@@ -91,7 +91,7 @@ struct SettingsView:View {
             VStack(alignment:.leading,spacing:12){Text("吸积盘风格").font(.system(size:12)).foregroundStyle(.secondary);Picker("",selection:$state.style){Text("炽金").tag(0);Text("冷蓝").tag(1);Text("星环").tag(2);Text("纯透镜").tag(3)}.pickerStyle(.segmented).labelsHidden()}
             VStack(spacing:17){dial("黑洞大小",$state.size,280...700,"阴影直径约 \(Int(state.size * 0.17)) pt");dial("引力透镜",$state.lens,3...24,String(format:"%.1f",state.lens));dial("吸积盘亮度",$state.brightness,0.3...3.5,String(format:"%.1f",state.brightness));dial("轨道倾角",$state.tilt,0.2...1.56,String(format:"%.0f°",state.tilt*180/Double.pi));dial("画面旋转",$state.roll,-0.8...0.8,String(format:"%.0f°",state.roll*180/Double.pi));dial("流动速度",$state.speed,0.1...1.8,String(format:"%.1f×",state.speed))}
             Divider().overlay(Color.white.opacity(0.05))
-            HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset()}}
+            HStack{Button(state.paused ? "继续流动":"暂停流动"){state.paused.toggle()};Button(state.visible ? "隐藏宠物":"显示宠物"){appDelegate?.togglePet()};Spacer();Button("恢复默认"){state.reset();appDelegate?.centerPet()}}
             HStack{Text("拖动黑洞移动 · 双击或右键打开设置").font(.system(size:11)).foregroundStyle(.secondary);Spacer();Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.3.0")").font(.system(size:10,design:.monospaced)).foregroundStyle(.secondary)}
         }.padding(26)}.frame(width:520,height:790).background(Color(red:0.055,green:0.06,blue:0.075)).preferredColorScheme(.dark)
     }

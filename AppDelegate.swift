@@ -1,7 +1,7 @@
 import Cocoa
 import SwiftUI
 
-let model=Model()
+let model = Model(defaults: RunMode.selfTest ? nil : .standard)
 var appDelegate: AppDelegate?
 func log(_ message:String) { NSLog("[Singularity] %@",message) }
 
@@ -12,16 +12,38 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     var status:NSStatusItem!
     let capture=Capture()
     var codexBridge:CodexStateBridge?
+    private var pendingResize: DispatchWorkItem?
+    private func observePreferences() {
+        model.onChange = { [weak self] change in
+            guard let self else { return }
+            switch change {
+            case .size:
+                self.pendingResize?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.resizePet() }
+                self.pendingResize = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: work)
+            case .bodyCount:
+                self.view?.resetOrbits(); self.resizePet()
+            case .drift: self.view?.orbits?.driftEnabled = model.systemDrift
+            case .position: self.savePosition()
+            case .cadence: self.checkScreen()
+            case .codexMode: self.restartCodexBridge()
+            case .redraw: break
+            }
+            self.view?.needsDisplay = true
+        }
+    }
     private var idleReasons=Set<Capture.Suspension>()
     func applicationDidFinishLaunching(_ notification:Notification) {
         let menu=NSMenu();let top=NSMenuItem();menu.addItem(top);let submenu=NSMenu();top.submenu=submenu
         submenu.addItem(withTitle:"关于奇点",action:#selector(about),keyEquivalent:"");submenu.addItem(withTitle:"设置…",action:#selector(showSettings),keyEquivalent:",");submenu.addItem(.separator());submenu.addItem(withTitle:"退出奇点",action:#selector(quit),keyEquivalent:"q");NSApp.mainMenu=menu
+        observePreferences()
         let size=model.sceneSize
         pet=PetWindow(contentRect:NSRect(x:500,y:300,width:size,height:size),styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         pet.title="奇点桌面宠物";pet.isOpaque=false;pet.backgroundColor = .clear;pet.hasShadow=false;pet.level = .floating;pet.hidesOnDeactivate=false;pet.collectionBehavior=[.canJoinAllSpaces,.fullScreenAuxiliary];pet.isReleasedWhenClosed=false
         view=PetView(frame:pet.contentView!.bounds,capture:capture);view.autoresizingMask=[.width,.height];pet.contentView=view
-        let d=UserDefaults.standard
-        let savedX=d.object(forKey:"x") as? Double, savedY=d.object(forKey:"y") as? Double
+        let prefs = PreferenceReader(defaults: RunMode.selfTest ? nil : .standard)
+        let savedX = prefs.coordinate("x"), savedY = prefs.coordinate("y")
         if let screen=NSScreen.main {pet.setFrameOrigin(NSPoint(x:screen.visibleFrame.minX+screen.visibleFrame.width*0.78-size/2,y:screen.visibleFrame.midY-size/2))}
         if let x=savedX,let y=savedY {
             let proposed=NSRect(x:x,y:y,width:size,height:size)
@@ -95,7 +117,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
         if notification.object as? NSWindow === settings {restartCodexBridge()}
     }
     @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "1.3.0",.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole；多体运动使用 Chipmunk2D（MIT）。")])}
-    func applicationWillTerminate(_ notification:Notification){savePosition()}
+    func applicationWillTerminate(_ notification:Notification){ if pendingResize != nil { resizePet() }; model.flushPreferences(); savePosition() }
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){
         model.visible.toggle()
@@ -113,6 +135,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate {
     }
     @objc func centerPet(){guard pet != nil,let s=NSScreen.main else{return};pet.setFrameOrigin(NSPoint(x:s.visibleFrame.midX-pet.frame.width/2,y:s.visibleFrame.midY-pet.frame.height/2));savePosition()}
     func resizePet(){
+        pendingResize?.cancel(); pendingResize = nil
         guard pet != nil else{return}
         let center=NSPoint(x:pet.frame.midX,y:pet.frame.midY),side=model.sceneSize
         var frame=NSRect(x:center.x-side/2,y:center.y-side/2,width:side,height:side)
