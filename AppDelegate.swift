@@ -112,14 +112,14 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
         #endif
     }
     func makeSettingsWindow() -> NSWindow {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 790),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "奇点 · 黑洞控制室"
         window.level = .normal
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
         window.contentView = NSHostingView(rootView: SettingsView(state: model))
-        window.contentMinSize = NSSize(width: 520, height: 540)
+        window.contentMinSize = NSSize(width: 520, height: 600)
         window.center()
         if !RunMode.selfTest { window.setFrameAutosaveName("Singularity.SettingsWindow") }
         window.delegate = self

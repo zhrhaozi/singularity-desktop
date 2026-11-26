@@ -11,7 +11,7 @@ enum PetChoices {
 }
 
 private enum SettingsPrompt: Int, Identifiable {
-    case reset, desktop
+    case desktop
     var id: Int { rawValue }
 }
 
@@ -25,7 +25,7 @@ private final class ParameterSliderCell: NSSliderCell {
         let rtl = controlView?.userInterfaceLayoutDirection == .rightToLeft
         let filled = NSRect(x: rtl ? middle : rail.minX, y: rail.minY,
                             width: rtl ? rail.maxX - middle : middle - rail.minX, height: rail.height)
-        NSColor(srgbRed: 0.96, green: 0.74, blue: 0.44, alpha: isEnabled ? 1 : 0.45).setFill()
+        NSColor(srgbRed: 0.94, green: 0.73, blue: 0.43, alpha: isEnabled ? 1 : 0.45).setFill()
         NSBezierPath(roundedRect: filled, xRadius: 2, yRadius: 2).fill()
     }
 }
@@ -69,9 +69,10 @@ struct SettingsView: View {
     @ObservedObject var state: Model
     @State private var tab: SettingsTab
     @State private var prompt: SettingsPrompt?
+    @State private var confirmReset = false
     @State private var hexDraft: String?
     @FocusState private var editingHex: Bool
-    private let accent = Color(red: 0.96, green: 0.74, blue: 0.44)
+    private let accent = Color(red: 0.94, green: 0.73, blue: 0.43)
     private let muted = Color.white.opacity(0.70)
     private let backdrop = Color(red: 0.055, green: 0.06, blue: 0.075)
     private static let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap(NSImage.init(contentsOf:))
@@ -104,8 +105,12 @@ struct SettingsView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 16)
             }.id(tab) // A new section always opens at its top.
         }
-        .frame(minWidth: 520, minHeight: 540).background(backdrop)
+        .frame(minWidth: 520, minHeight: 600).background(backdrop)
         .labeledContentStyle(TrailingFieldStyle()).preferredColorScheme(.dark).accentColor(accent).tint(accent).toggleStyle(.switch)
+        .confirmationDialog("恢复全部默认设置？", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("恢复默认", role: .destructive) { hexDraft = nil; state.reset(); appDelegate?.centerPet() }
+            Button("取消", role: .cancel) {}
+        } message: { Text("外观、运动、桌面刷新和联动来源会恢复默认，桌宠将回到屏幕中央。此操作不能撤销。") }
         .alert(item: $prompt) { which in
             switch which {
             case .desktop:
@@ -113,12 +118,6 @@ struct SettingsView: View {
                              message: Text("开放调试端口后，其他本机进程也可能访问已登录的 Codex。文件桥接不需要端口，奇点也不会替你开启端口。"),
                              primaryButton: .default(Text("启用桌面联动")) { state.codexMode = .desktop },
                              secondaryButton: .cancel(Text("取消")))
-            case .reset:
-                return Alert(title: Text("恢复全部默认设置？"),
-                             message: Text("外观、运动、桌面刷新和联动来源会恢复默认，桌宠将回到屏幕中央。此操作不能撤销。"),
-                             primaryButton: .destructive(Text("恢复默认")) {
-                                 hexDraft = nil; state.reset(); appDelegate?.centerPet()
-                             }, secondaryButton: .cancel(Text("取消")))
             }
         }
     }
@@ -151,10 +150,11 @@ struct SettingsView: View {
 
     private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.system(size: 15, weight: .semibold)).accessibilityAddTraits(.isHeader)
+            Text(title).font(.headline).accessibilityAddTraits(.isHeader)
             content()
-        }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
+        }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.06), lineWidth: 1))
     }
     private func note(_ text: String) -> some View {
         Text(text).font(.system(size: 12)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
@@ -162,6 +162,8 @@ struct SettingsView: View {
     private func warning(_ text: String) -> some View {
         Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "exclamationmark.triangle.fill") }
             .font(.system(size: 12)).foregroundStyle(Color.orange)
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
     }
     private func dial(_ name: String, _ value: Binding<Double>, _ spec: NumericSetting<Double>, _ display: String) -> some View {
         HStack(spacing: 12) {
@@ -235,6 +237,8 @@ struct SettingsView: View {
                     hexDraft = text
                     if let rgb = RGB(hex: text) { state.colorHex = rgb.hex }
                 })).textFieldStyle(.roundedBorder).font(.system(size: 13, design: .monospaced)).frame(width: 98)
+                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(
+                        hexDraft.map { RGB(hex: $0) == nil } == true ? Color.red : .clear, lineWidth: 1))
                     .focused($editingHex).onChange(of: editingHex) { if !$0 { hexDraft = nil } }
                     .accessibilityLabel("十六进制颜色")
             }
@@ -295,7 +299,9 @@ struct SettingsView: View {
                         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(command, forType: .string)
                     }
                 }
-                note("复制的是本应用内桥接工具的完整路径。只有明确的完成事件才会触发完成闪光。")
+                Label("关于这个命令", systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(muted)
+                    .help("复制的是本应用内桥接工具的完整路径。只有明确的完成事件才会触发完成闪光。")
+                    .accessibilityHint("复制应用内工具的完整路径；只有明确的完成事件才会触发完成闪光。")
             }
         }
     }
@@ -339,7 +345,7 @@ struct SettingsView: View {
             LabeledContent("快捷操作", value: "右键黑洞或点按菜单栏图标")
             note("暂停会停止流动、公转和漫游；隐藏还会暂停桌面采样。")
         }
-        section("默认设置") { Button("恢复全部默认设置…") { prompt = .reset } }
+        section("默认设置") { Button("恢复全部默认设置…") { confirmReset = true } }
         note("着色器基于 s0xDk/ghostty-blackhole；多体运动使用 Chipmunk2D（MIT）。")
     }
 }

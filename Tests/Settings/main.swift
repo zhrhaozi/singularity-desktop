@@ -11,7 +11,7 @@ app.setActivationPolicy(.accessory)
 let coordinator = AppDelegate()
 let actualWindow = coordinator.makeSettingsWindow()
 precondition(actualWindow.styleMask.contains(.resizable) && actualWindow.level == .normal)
-precondition(actualWindow.contentMinSize == NSSize(width: 520, height: 540))
+precondition(actualWindow.contentMinSize == NSSize(width: 520, height: 600))
 let menu = coordinator.makeMenu()
 model.bodyCount = 2; model.style = 1; model.paused = true
 coordinator.menuNeedsUpdate(menu)
@@ -20,7 +20,7 @@ precondition(menu.item(withTitle: "黑洞系统")?.submenu?.item(withTitle: "双
 precondition(menu.item(withTitle: "吸积盘风格")?.submenu?.item(withTitle: "冷蓝")?.state == .on)
 precondition(menu.item(withTitle: "Codex：" + model.codexState.label)?.isEnabled == false)
 
-func snap(_ name: String, _ tab: SettingsTab, width: CGFloat = 560, height: CGFloat = 680, setup: (Model) -> Void = { _ in }) throws {
+func snap(_ name: String, _ tab: SettingsTab, width: CGFloat = 520, height: CGFloat = 790, setup: (Model) -> Void = { _ in }) throws {
     let state = Model(defaults: nil); setup(state)
     let rect = NSRect(x: 0, y: 0, width: width, height: height)
     let host = NSHostingView(rootView: SettingsView(state: state, initialTab: tab).environment(\.locale, Locale(identifier: "zh_CN")).frame(width: width, height: height))
@@ -39,7 +39,7 @@ try snap("appearance", .appearance)
 try snap("appearance-color", .appearance) { $0.customColor = true; $0.colorHex = "#8A5CFF"; $0.kind = 3 }
 try snap("motion", .motion) { $0.bodyCount = 3; $0.wander = true }
 try snap("codex", .codex)
-try snap("codex-manual", .codex, width: 520, height: 540) {
+try snap("codex-manual", .codex, width: 520, height: 600) {
     $0.codexMode = .manual; $0.setCodexState(.command, source: "手动预览")
 }
 try snap("lens", .lens) {
