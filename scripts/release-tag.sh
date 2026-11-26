@@ -10,7 +10,8 @@ prefix="Singularity-$version-AppleSilicon"
 app=dist/奇点.app
 codesign --verify --deep --strict "$app"
 identity=$(codesign -dv --verbose=4 "$app" 2>&1)
-grep -Fxq "TeamIdentifier=${MACOS_TEAM_ID:?expected signing team}" <<< "$identity"
+[[ ${MACOS_TEAM_ID:-} =~ ^[A-Z0-9]{10}$ ]] || { echo "Expected a ten-character Apple team ID" >&2; exit 1; }
+grep -Fxq "TeamIdentifier=$MACOS_TEAM_ID" <<< "$identity"
 grep -Eq 'flags=.*runtime' <<< "$identity"
 [[ $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist") == "$version" ]]
 (cd dist; shasum -a 256 "$prefix.dmg" "$prefix.zip" | diff - SHA256SUMS.txt)

@@ -18,10 +18,18 @@ export MACOS_TEAM_ID=$(codesign -dv --verbose=4 dist/奇点.app 2>&1 | sed -n 's
 cd "$t/project"; script=./scripts/release-tag.sh
 if GITHUB_REF_TYPE=branch "$script" > /dev/null 2>&1; then exit 1; fi
 if GITHUB_REF_NAME=v0.0.0 "$script" > /dev/null 2>&1; then exit 1; fi
-if MACOS_TEAM_ID=incorrect "$script" > /dev/null 2>&1; then exit 1; fi
+if MACOS_TEAM_ID= "$script" > /dev/null 2>&1; then exit 1; fi
+wrong_team=AAAAAAAAAA; [[ "$wrong_team" != "$MACOS_TEAM_ID" ]] || wrong_team=BBBBBBBBBB
+if MACOS_TEAM_ID=$wrong_team "$script" > /dev/null 2>&1; then exit 1; fi
+# Re-sign a private fixture copy, never the working release application or the installed app.
+rm dist/奇点.app; ditto "$root/dist/奇点.app" dist/奇点.app
+codesign --force --options runtime --sign - dist/奇点.app 2>/dev/null
+if "$script" > /dev/null 2>&1; then exit 1; fi
+if MACOS_TEAM_ID='not set' "$script" > /dev/null 2>&1; then exit 1; fi
+rm -rf dist/奇点.app; ln -s "$root/dist/奇点.app" dist/奇点.app
 printf 'tampered\n' >> dist/SHA256SUMS.txt
 if "$script" > /dev/null 2>&1; then exit 1; fi
 [[ ! -e "$QA_GH_CALLS" ]]; cp "$root/dist/SHA256SUMS.txt" dist/
 "$script"
 printf '%s\n' release create "v$version" "dist/$prefix.dmg" "dist/$prefix.zip" dist/SHA256SUMS.txt --verify-tag --title "奇点 $version" --generate-notes | diff - "$QA_GH_CALLS"
-echo 'RELEASE_FIXTURE_PASS: branch, wrong tag, wrong team and tampered assets rejected; correct package reaches only the local gh recorder'
+echo 'RELEASE_FIXTURE_PASS: branch, wrong tag, missing/wrong team, ad-hoc signature and tampered assets rejected; correct package reaches only the local gh recorder'
