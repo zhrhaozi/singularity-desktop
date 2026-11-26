@@ -236,7 +236,7 @@ struct SettingsView: View {
         }
         .font(.system(size: 12)).foregroundStyle(Color.orange)
         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
     }
     private func dial(_ name: String, _ value: Binding<Double>, _ spec: NumericSetting<Double>, _ display: String)
         -> some View
