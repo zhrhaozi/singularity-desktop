@@ -32,7 +32,11 @@ if [ -z "$SIGNING_IDENTITY" ]; then
 fi
 if [ -n "$SIGNING_IDENTITY" ]; then
   echo "Signing with Apple Development identity: $SIGNING_IDENTITY"
-  codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$DEST/$NAME.app"
+  if [[ -n ${SINGULARITY_SIGNING_KEYCHAIN:-} ]]; then
+    codesign --force --options runtime --keychain "$SINGULARITY_SIGNING_KEYCHAIN" --sign "$SIGNING_IDENTITY" "$DEST/$NAME.app"
+  else
+    codesign --force --options runtime --sign "$SIGNING_IDENTITY" "$DEST/$NAME.app"
+  fi
 else
   echo "No Apple Development identity found; falling back to ad-hoc signing"
   codesign --force --options runtime --sign - "$DEST/$NAME.app"

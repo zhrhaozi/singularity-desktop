@@ -217,3 +217,7 @@ QA 的 `--self-test` 使用在 `-O` 下仍生效的显式检查，失败返回�
 分型背景参考：[Einstein Online](https://www.einstein-online.info/en/spotlight/Rotating-Black-Holes-Observations-and-Working-in-General-Relativity/)、[Kerr–Newman metric / Scholarpedia](https://www.scholarpedia.org/article/Kerr-Newman_metric)。
 
 项目采用 [MIT License](LICENSE)。
+
+### 标签发布（维护者）
+
+普通提交和 PR 只构建和测试；仅推送与 `VERSION` 一致的 `vX.Y.Z` 标签才打包并上传 DMG、应用 ZIP 和 SHA-256 清单。GitHub 的 `release` 环境需预先配置证书机密 `MACOS_CERTIFICATE_P12_BASE64`、`MACOS_CERTIFICATE_PASSWORD`，以及变量 `MACOS_TEAM_ID`。私钥不进仓库。缺少凭据、团队不符、版本不合或清单不符均拒绝发布，不会用临时签名替代，也不会覆盖已有版本。此流程不等同于 Apple 公证。
