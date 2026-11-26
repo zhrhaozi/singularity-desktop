@@ -65,8 +65,6 @@ enum OrbitalTuning {
     static let wallRestitution: Double = 0.4
     /// Velocity clamp as a final safety net against fly-away.
     static let maxSpeed: Double = 2.0
-    /// No extra velocity damping; collisions and safety clamps can lose energy.
-    static let damping: Double = 0.0
 
     /// Ratio of the launch speed to the local circular speed. Below 1 makes the
     /// initial orbit eccentric; mutual forces and collisions then perturb it.
@@ -147,12 +145,12 @@ final class OrbitalSystem {
     func reset(count: Int) {
         let n = OrbitalTuning.supported(count)
         var rng = SplitMix64(seed: Self.baseSeed)
-        particles = Self.makeParticles(count: n, rng: &rng)
         sg_orbit_destroy(physics)
         physics=sg_orbit_create(Int32(n))
         precondition(physics != nil,"Chipmunk2D world allocation")
         sg_orbit_configure(physics,OrbitalTuning.gravity(for:n),OrbitalTuning.softening(for:n),
                            OrbitalTuning.repelRange(for:n),OrbitalTuning.repelStrength,OrbitalTuning.trapStrength(for:n))
+        particles = Self.makeParticles(count: n, world: physics, rng: &rng)
         for (index,p) in particles.enumerated() {
             sg_orbit_set_state(physics,Int32(index),SGOrbitState(x:p.x,y:p.y,vx:p.vx,vy:p.vy))
         }
@@ -196,7 +194,6 @@ final class OrbitalSystem {
         var y: Double
         var vx: Double
         var vy: Double
-        let mass: Double
         let phase: Double
         var encounter: Double
     }
@@ -209,9 +206,8 @@ final class OrbitalSystem {
 
     // MARK: Initial conditions
 
-    private static func makeParticles(count: Int, rng: inout SplitMix64) -> [Particle] {
+    private static func makeParticles(count: Int, world: OpaquePointer?, rng: inout SplitMix64) -> [Particle] {
         // Seeded asymmetry keeps resets reproducible without exact symmetry.
-        let masses = [Double](repeating: 1.0, count: count)
         let radii = OrbitalTuning.launchRadii(for: count)
         let spread = OrbitalTuning.launchAngleSpread(for: count)
         var result: [Particle] = []
@@ -219,17 +215,21 @@ final class OrbitalSystem {
             let angle = Double(i) * spread + rng.signed() * OrbitalTuning.launchJitter
             let radius = radii[i] * (1.0 + rng.signed() * OrbitalTuning.launchJitter)
             result.append(Particle(x: cos(angle) * radius, y: sin(angle) * radius,
-                                   vx: 0, vy: 0, mass: masses[i],
+                                   vx: 0, vy: 0,
                                    phase: rng.unit() * 2.0 * Double.pi, encounter: 0))
         }
         // Circular speed from the real acceleration (radial field + gravity),
         // then scaled below 1 for a bound elliptical rosette.
-        let (ax, ay) = accelerations(result)
+        // Publish every seed position before asking the shared C field for any launch velocity.
+        for (i, p) in result.enumerated() {
+            sg_orbit_set_state(world, Int32(i), SGOrbitState(x: p.x, y: p.y, vx: 0, vy: 0))
+        }
         for i in result.indices {
             let x = result[i].x, y = result[i].y
             let r = max(sqrt(x * x + y * y), 1e-6)
             let rhatX = x / r, rhatY = y / r
-            let inward = -(ax[i] * rhatX + ay[i] * rhatY)
+            let a = sg_orbit_acceleration(world, Int32(i))
+            let inward = -(a.x * rhatX + a.y * rhatY)
             let circular = sqrt(max(inward, 0) * r)
             let v = circular * OrbitalTuning.speedFactor(for: count) * (1.0 + rng.signed() * OrbitalTuning.launchJitter)
             // One counter-orbiting member produces conjunctions in triple mode.
@@ -242,57 +242,6 @@ final class OrbitalSystem {
     }
 
     // MARK: Physics
-
-    /// Net acceleration (gravity + repulsion + containment + damping) for a
-    /// set of particles using the current positions/velocities.
-    private static func accelerations(_ p: [Particle]) -> ([Double], [Double]) {
-        let n = p.count
-        var ax = [Double](repeating: 0, count: n)
-        var ay = [Double](repeating: 0, count: n)
-        guard n > 0 else { return (ax, ay) }
-        let softening = OrbitalTuning.softening(for: n)
-        let soft2 = softening * softening
-        let gravity = OrbitalTuning.gravity(for: n)
-        let repelRange = OrbitalTuning.repelRange(for: n)
-
-        // Pairwise field: softened gravity plus short-range anti-overlap push.
-        for i in 0..<n {
-            for j in (i + 1)..<n {
-                let dx = p[j].x - p[i].x
-                let dy = p[j].y - p[i].y
-                let r2 = dx * dx + dy * dy
-                let r = sqrt(r2)
-                let inv = 1.0 / max(r, 1e-9)
-                let ux = dx * inv
-                let uy = dy * inv
-
-                let denom = (r2 + soft2) * sqrt(r2 + soft2)
-                let gCommon = gravity / denom
-                let gi = gCommon * p[j].mass
-                let gj = gCommon * p[i].mass
-                ax[i] += gi * dx; ay[i] += gi * dy
-                ax[j] -= gj * dx; ay[j] -= gj * dy
-
-                if r < repelRange {
-                    let strength = OrbitalTuning.repelStrength
-                        * (repelRange - r) / repelRange
-                    ax[i] -= strength * ux; ay[i] -= strength * uy
-                    ax[j] += strength * ux; ay[j] += strength * uy
-                }
-            }
-        }
-
-        for i in 0..<n {
-            let x = p[i].x, y = p[i].y
-            // Artistic external radial field: harmonic pull toward the centre.
-            let trap = OrbitalTuning.trapStrength(for: n)
-            ax[i] -= trap * x
-            ay[i] -= trap * y
-            ax[i] -= OrbitalTuning.damping * p[i].vx
-            ay[i] -= OrbitalTuning.damping * p[i].vy
-        }
-        return (ax, ay)
-    }
 
     private func substep(_ h: Double) {
         let n = particles.count

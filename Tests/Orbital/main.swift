@@ -8,6 +8,21 @@ func expect(_ condition: Bool, _ name: String) {
     if !condition { fputs("FAIL: " + name + "\n",stderr); exit(1) }
 }
 
+// Launch and integration must ask the exact same field, including repulsion.
+for separation in [0.14, 0.45] {
+    let world = sg_orbit_create(2)!
+    defer { sg_orbit_destroy(world) }
+    sg_orbit_configure(world, 0.04, 0.03, 0.2, 25, 2.5)
+    sg_orbit_set_state(world, 0, SGOrbitState(x: 0, y: -0.02, vx: 0, vy: 0))
+    sg_orbit_set_state(world, 1, SGOrbitState(x: separation, y: 0.02, vx: 0, vy: 0))
+    let a = sg_orbit_acceleration(world, 0)
+    let dt = 0.001
+    sg_orbit_step(world, dt)
+    let next = sg_orbit_get_state(world, 0)
+    expect(abs(next.vx - a.x * dt) < 1e-12 && abs(next.vy - a.y * dt) < 1e-12, "shared launch and integration field")
+    expect(sg_orbit_acceleration(world, -1).x == 0, "invalid field index is safe")
+}
+
 func allFinite(_ bodies: [OrbitalBody]) -> Bool {
     bodies.allSatisfy {
         $0.position.x.isFinite && $0.position.y.isFinite

@@ -26,11 +26,8 @@ static void collision_solved(cpArbiter *arbiter, cpSpace *space, cpDataPointer d
     }
 }
 
-// Chipmunk updates all positions before invoking velocity callbacks. Evaluate
-// position-dependent forces here, not before cpSpaceStep, to avoid explicit
-// Euler energy growth in the containment field.
-static void update_velocity(cpBody *body, cpVect unused, cpFloat damping, cpFloat dt) {
-    SGOrbitWorld *world = cpBodyGetUserData(body);
+// Shared by initial orbit construction and Chipmunk's per-substep update.
+static cpVect field_at_body(const SGOrbitWorld *world, const cpBody *body) {
     cpVect p = cpBodyGetPosition(body);
     cpVect acceleration = cpvmult(p, -world->containment);
     for (int i = 0; i < world->count; i++) {
@@ -43,7 +40,18 @@ static void update_velocity(cpBody *body, cpVect unused, cpFloat damping, cpFloa
             strength -= world->repelStrength * (world->repelRange - r) / (world->repelRange * r);
         acceleration = cpvadd(acceleration, cpvmult(delta, strength));
     }
-    cpBodyUpdateVelocity(body, acceleration, damping, dt);
+    return acceleration;
+}
+
+SGOrbitVec sg_orbit_acceleration(SGOrbitWorld *world, int index) {
+    if (!world || index < 0 || index >= world->count) return (SGOrbitVec){0};
+    cpVect a = field_at_body(world, world->bodies[index]);
+    return (SGOrbitVec){a.x, a.y};
+}
+
+// Chipmunk advances positions before this callback, avoiding explicit Euler energy growth.
+static void update_velocity(cpBody *body, cpVect unused, cpFloat damping, cpFloat dt) {
+    cpBodyUpdateVelocity(body, field_at_body(cpBodyGetUserData(body), body), damping, dt);
 }
 
 SGOrbitWorld *sg_orbit_create(int count) {
