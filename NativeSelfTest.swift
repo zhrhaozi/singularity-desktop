@@ -69,7 +69,7 @@ enum NativeSelfTest {
         renderChecks(app.view)
         multiBodyRenderChecks(app.view)
         recoveryPolicyChecks()
-        snapshotPixelChecks()
+        await snapshotPixelChecks()
         if RunMode.renderOnly {
             log("SELF_TEST_PASS generated-texture renderer-only")
             NSApp.terminate(nil)
@@ -520,7 +520,7 @@ enum NativeSelfTest {
         catch {require(false,"capture backdrop launch: \(error)");return nil}
     }
 
-    static func snapshotPixelChecks() {
+    @MainActor static func snapshotPixelChecks() async {
         func make(_ alignment:Int,_ padding:UInt8)->CVPixelBuffer {
             var buffer:CVPixelBuffer?
             require(CVPixelBufferCreate(kCFAllocatorDefault,7,5,kCVPixelFormatType_32BGRA,
@@ -535,13 +535,17 @@ enum NativeSelfTest {
         }
         let a=make(64,1),b=make(128,2),rect=CGRect(x:2,y:3,width:7,height:5)
         let first=Capture.Snapshot(buffer:a,rect:rect),second=Capture.Snapshot(buffer:b,rect:rect)
-        require(Capture.samePixels(first,first),"identical immutable buffer")
-        require(Capture.samePixels(first,second),"comparison ignores unequal row padding")
-        require(!Capture.samePixels(first,Capture.Snapshot(buffer:a,rect:rect.offsetBy(dx:1,dy:0))),"same buffer at new coordinates is new content")
+        let identical = await Capture.samePixels(first, first)
+        let equalContent = await Capture.samePixels(first, second)
+        let moved = await Capture.samePixels(first, Capture.Snapshot(buffer: a, rect: rect.offsetBy(dx: 1, dy: 0)))
+        require(identical, "identical immutable buffer")
+        require(equalContent, "comparison ignores unequal row padding")
+        require(!moved, "same buffer at new coordinates is new content")
         require(CVPixelBufferLockBaseAddress(b,[])==kCVReturnSuccess,"comparison mutation lock")
         CVPixelBufferGetBaseAddress(b)!.storeBytes(of:UInt8(43),toByteOffset:4*CVPixelBufferGetBytesPerRow(b)+27,as:UInt8.self)
         CVPixelBufferUnlockBaseAddress(b,[])
-        require(!Capture.samePixels(first,second),"comparison detects final pixel and alpha change")
+        let equalAfterMutation = await Capture.samePixels(first, second)
+        require(!equalAfterMutation, "comparison detects final pixel and alpha change")
         log("CAPTURE_PIXEL_TEST_PASS equal padding stride final-pixel coordinates")
     }
 

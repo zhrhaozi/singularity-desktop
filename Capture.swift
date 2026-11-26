@@ -19,7 +19,8 @@ struct CaptureRetryBudget {
 }
 
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
-    struct Snapshot {
+    // The producer has completed each retained buffer; all consumers only read it.
+    struct Snapshot: @unchecked Sendable {
         let buffer: CVPixelBuffer
         let rect: CGRect
     }
@@ -373,7 +374,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                     let preferred=self.preferredFramesPerSecond
                     let adaptive=self.adaptiveSampling && preferred==10
                     let comparisonStart=ProcessInfo.processInfo.systemUptime
-                    let unchanged=adaptive && self.latestSnapshot().map{Self.samePixels($0,next)}==true
+                    var unchanged = false
+                    if adaptive, let previous = self.latestSnapshot() {
+                        unchanged = await Self.samePixels(previous, next)
+                    }
+                    // The UI may move the pet, switch displays, hide it, or reconnect while comparing.
+                    guard !Task.isCancelled, self.activeID == sourceID, self.requestSerial == serial else { return }
+                    guard self.configurationUpdates == revision, self.desiredRegion == region else { continue }
                     if adaptive,!unchanged,RunMode.selfTest,
                        ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_DIAGNOSTICS"]=="1" {
                         log("CAPTURE_PIXELS_CHANGED uptime=\(ProcessInfo.processInfo.systemUptime) rect=\(region)")
@@ -411,7 +418,16 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         }
     }
-    static func samePixels(_ a:Snapshot,_ b:Snapshot)->Bool {
+    private static let pixelQueue = DispatchQueue(label: "singularity.capture.compare", qos: .utility)
+
+    static func samePixels(_ a: Snapshot, _ b: Snapshot) async -> Bool {
+        await withCheckedContinuation { continuation in
+            pixelQueue.async { continuation.resume(returning: compareLockedPixels(a, b)) }
+        }
+    }
+
+    private static func compareLockedPixels(_ a: Snapshot, _ b: Snapshot) -> Bool {
+        dispatchPrecondition(condition: .onQueue(pixelQueue))
         guard a.rect==b.rect,
               CVPixelBufferGetPixelFormatType(a.buffer)==kCVPixelFormatType_32BGRA,
               CVPixelBufferGetPixelFormatType(b.buffer)==kCVPixelFormatType_32BGRA,
