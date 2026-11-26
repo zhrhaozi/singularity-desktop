@@ -293,9 +293,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec4 mapping = useGeometryCache == 1 ? texelFetch(geometryMap, localPixel, 0) : vec4(0.0, 0.0, 0.0, -1.0);
     if (mapping.w >= 0.0) {
         captured = mapping.w > 0.5;
-        bg = desktopSample(mapping.xy).rgb * mapping.z;
-        shadeCrossing(texelFetch(crossingMap0, localPixel, 0).xyz, L, rin, rout, dil, emitc, trans);
-        shadeCrossing(texelFetch(crossingMap1, localPixel, 0).xyz, L, rin, rout, dil, emitc, trans);
+        vec4 first = texelFetch(crossingMap0, localPixel, 0);
+        vec4 second = texelFetch(crossingMap1, localPixel, 0);
+        bg = desktopSample(mapping.xy + vec2(first.w, second.w)).rgb * mapping.z;
+        shadeCrossing(first.xyz, L, rin, rout, dil, emitc, trans);
+        shadeCrossing(second.xyz, L, rin, rout, dil, emitc, trans);
     } else {
 #endif
     // ====================== near field: trace the geodesic ==================
@@ -401,7 +403,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             // they fade to the starfield instead of sampling garbage
             float toward = smoothstep(0.05, 0.35, -d.z);
 #ifdef GEOMETRY_PASS
-            geometryBackground.xyz = vec3(suv, toward);
+            // Every point on this grid is exactly representable in half precision. Preserve
+            // subpixel UVs in the two unused crossing channels; no extra texture or fetch.
+            vec2 coarse = floor(suv * 1024.0) / 1024.0;
+            geometryBackground.xyz = vec3(coarse, toward);
+            geometryCrossing0.w = suv.x - coarse.x;
+            geometryCrossing1.w = suv.y - coarse.y;
 #else
             bg += desktopSample(suv).rgb * toward;
 #endif

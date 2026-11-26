@@ -30,7 +30,9 @@ final class LensGeometryCache {
                 glBindTexture(GLenum(GL_TEXTURE_2D), textures[i])
                 glTexParameteri(GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_MIN_FILTER), GL_NEAREST)
                 glTexParameteri(GLenum(GL_TEXTURE_2D), GLenum(GL_TEXTURE_MAG_FILTER), GL_NEAREST)
-                glTexImage2D(GLenum(GL_TEXTURE_2D), 0, GL_RGBA32F, width, height, 0,
+                // The crossing phase is precision-sensitive. Only the mapping target uses half floats.
+                let format = i == 0 ? GL_RGBA16F : GL_RGBA32F
+                glTexImage2D(GLenum(GL_TEXTURE_2D), 0, format, width, height, 0,
                              GLenum(GL_RGBA), GLenum(GL_FLOAT), nil)
                 glFramebufferTexture2D(GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0) + GLenum(i),
                                        GLenum(GL_TEXTURE_2D), textures[i], 0)

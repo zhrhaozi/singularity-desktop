@@ -970,6 +970,15 @@ enum NativeSelfTest {
         require(pixels(280) != paused,"resume moves")
         log("RENDER_TEST_PASS \(cases) state/style/scale frames shadow transparency movement pause-resume")
         require(view.geometryCache?.available==true,"geometry cache active")
+        view.geometryCache?.bind()
+        for (index, expected) in [GL_RGBA16F, GL_RGBA32F, GL_RGBA32F].enumerated() {
+            glActiveTexture(GLenum(GL_TEXTURE2) + GLenum(index))
+            var actual: GLint = 0
+            glGetTexLevelParameteriv(GLenum(GL_TEXTURE_2D), 0, GLenum(GL_TEXTURE_INTERNAL_FORMAT), &actual)
+            require(actual == expected, "driver geometry attachment \(index) format: \(actual)")
+        }
+        glActiveTexture(GLenum(GL_TEXTURE0))
+        log("GEOMETRY_STORAGE_PASS driver formats=16F/32F/32F bytes-per-texel=40 previous=48")
         log("GEOMETRY_EQUIVALENCE_TEST_PASS \(cases) cached/reference frames")
         let wasCapturing=model.capturing,oldRect=view.capture.screenRect
         model.capturing=true
