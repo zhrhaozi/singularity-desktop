@@ -1,3 +1,4 @@
+#if SELF_TEST
 import Cocoa
 import OpenGL.GL3
 import ScreenCaptureKit
@@ -68,7 +69,7 @@ enum NativeSelfTest {
         shaderFailureChecks()
         renderChecks(app.view)
         multiBodyRenderChecks(app.view)
-        recoveryPolicyChecks()
+        CapturePolicyDiagnostic.run()
         await snapshotPixelChecks()
         if RunMode.renderOnly {
             log("SELF_TEST_PASS generated-texture renderer-only")
@@ -348,27 +349,6 @@ enum NativeSelfTest {
             log("PERFORMANCE_RUN_END fps=\(Double(app.view.drawnFrames-frames)/elapsed) imports=\(app.view.importedFrames-imports) copies=\(app.view.copiedFrames-copies) cache-rebuilds=\(app.view.geometryCache?.rebuilds ?? 0)")
             NSApp.terminate(nil)
         }
-    }
-
-    static func recoveryPolicyChecks() {
-        var budget=CaptureRetryBudget()
-        for (i,delay) in [1.0,2,4,8,16].enumerated() {
-            budget.connected(at:Double(i))
-            require(budget.nextDelay(at:Double(i)+0.5)==delay,"bounded exponential backoff")
-        }
-        require(budget.nextDelay(at:6)==nil,"retry budget exhausted")
-        budget.connected(at:10)
-        require(budget.nextDelay(at:40)==1,"stable connection resets retry budget")
-        budget.reset()
-        require(budget.nextDelay(at:41)==1,"explicit request resets retry budget")
-        for code in [-3802,-3804,-3805,-3806,-3811,-3813,-3814,-3815] {
-            require(Capture.isRecoverable(NSError(domain:SCStreamErrorDomain,code:code)),"transient code \(code)")
-        }
-        for code in [-3801,-3803,-3812,-3817,-3821,-9999] {
-            require(!Capture.isRecoverable(NSError(domain:SCStreamErrorDomain,code:code)),"terminal code \(code)")
-        }
-        require(!Capture.isRecoverable(NSError(domain:"unknown",code:-3805)),"unknown error domain")
-        log("CAPTURE_POLICY_TEST_PASS retry-budget stable-reset user-stop permission-stop system-stop unknown")
     }
 
     @MainActor static func recoveryChecks(_ app:AppDelegate,screen:NSScreen) async {
@@ -1196,3 +1176,4 @@ enum NativeSelfTest {
         log("MULTIBODY_RENDER_TEST_PASS \(cases) cached-reference zero-copy transparency coupled-lensing motion light-flow collision stable-cache lifecycle hits")
     }
 }
+#endif

@@ -61,19 +61,25 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var screenshotAvailable=true
     private(set) var screenshotRequests=0
     private(set) var unchangedScreenshots=0
+    #if SELF_TEST
     private(set) var comparisonMilliseconds=[Double]()
+    #endif
     private var adaptiveCadence=AdaptiveCaptureCadence()
     var adaptiveSampling=true
+    #if SELF_TEST
     var selfTestScreenshotDelay:UInt64=0
     var selfTestStreamStartDelay:UInt64=0
+    #endif
     private(set) var activeID:UUID?
     private(set) var appliedFramesPerSecond=0
     private var desiredFramesPerSecond=0
     private(set) var configurationUpdates=0
     var forceFullDisplay=ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_FULL_DISPLAY"]=="1"
     var forceStream=ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_BACKEND"]=="stream"
+    #if SELF_TEST
     var benchmarkWindowFilter=false
     var benchmarkNominalResolution=false
+    #endif
     var framesPerSecond:Int?
     private var usesScreenshots:Bool {
         if #available(macOS 14.0, *) {return screenshotAvailable && !forceStream}
@@ -238,7 +244,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
     @MainActor private func configuration(region:CGRect,screen:NSScreen)->SCStreamConfiguration {
         let config=SCStreamConfiguration()
+        #if SELF_TEST
         if #available(macOS 14.0, *),benchmarkNominalResolution {config.captureResolution = .nominal}
+        #endif
         config.sourceRect=CaptureRegion.sourceRect(region,on:screen.frame)
         config.width=max(1,Int((region.width*captureScale).rounded(.up)))
         config.height=max(1,Int((region.height*captureScale).rounded(.up)))
@@ -288,9 +296,13 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             // before WindowServer's on-screen window list has caught up.
             let own=content.applications.filter{$0.processID == ProcessInfo.processInfo.processIdentifier}
             guard !own.isEmpty else {throw captureError(2,"应用窗口尚未就绪")}
+            #if SELF_TEST
             let filter=benchmarkWindowFilter ?
                 SCContentFilter(display:display,excludingWindows:content.windows.filter{$0.owningApplication?.processID==getpid()}) :
                 SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
+            #else
+            let filter = SCContentFilter(display: display, excludingApplications: own, exceptingWindows: [])
+            #endif
             captureScale=screen.backingScaleFactor
             if #available(macOS 14.0, *) {captureScale=CGFloat(filter.pointPixelScale)}
             if !captureScale.isFinite || captureScale<=0 {captureScale=max(1,screen.backingScaleFactor)}
@@ -313,9 +325,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             screenRect=region;displayID=id;stream=next
             acceptFrames(from:next,screen:screen,region:usesRegion)
             try await next.startCapture()
+            #if SELF_TEST
             if RunMode.selfTest,selfTestStreamStartDelay>0 {
                 try await Task.sleep(nanoseconds:selfTestStreamStartDelay)
             }
+            #endif
             guard serial == requestSerial,stream === next else {return}
             startedStream=next
             appliedFramesPerSecond=Int(config.minimumFrameInterval.timescale)
@@ -362,9 +376,11 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                 }
                 do {
                     let sample=try await SCScreenshotManager.captureSampleBuffer(contentFilter:filter,configuration:config)
+                    #if SELF_TEST
                     if RunMode.selfTest,self.selfTestScreenshotDelay>0 {
                         try await Task.sleep(nanoseconds:self.selfTestScreenshotDelay)
                     }
+                    #endif
                     guard !Task.isCancelled,self.activeID==sourceID,self.requestSerial==serial else{return}
                     self.screenshotDeadline?.cancel();self.screenshotDeadline=nil
                     guard let image=CMSampleBufferGetImageBuffer(sample) else {
@@ -373,7 +389,9 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                     let next=Snapshot(buffer:image,rect:region)
                     let preferred=self.preferredFramesPerSecond
                     let adaptive=self.adaptiveSampling && preferred==10
+                    #if SELF_TEST
                     let comparisonStart=ProcessInfo.processInfo.systemUptime
+                    #endif
                     var unchanged = false
                     if adaptive, let previous = self.latestSnapshot() {
                         unchanged = await Self.samePixels(previous, next)
@@ -381,6 +399,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                     // The UI may move the pet, switch displays, hide it, or reconnect while comparing.
                     guard !Task.isCancelled, self.activeID == sourceID, self.requestSerial == serial else { return }
                     guard self.configurationUpdates == revision, self.desiredRegion == region else { continue }
+                    #if SELF_TEST
                     if adaptive,!unchanged,RunMode.selfTest,
                        ProcessInfo.processInfo.environment["SINGULARITY_CAPTURE_DIAGNOSTICS"]=="1" {
                         log("CAPTURE_PIXELS_CHANGED uptime=\(ProcessInfo.processInfo.systemUptime) rect=\(region)")
@@ -388,6 +407,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                     if adaptive,RunMode.performance,self.comparisonMilliseconds.count<10_000 {
                         self.comparisonMilliseconds.append((ProcessInfo.processInfo.systemUptime-comparisonStart)*1000)
                     }
+                    #endif
                     if unchanged {self.unchangedScreenshots+=1}
                     else {self.acceptSnapshot(next)}
                     self.screenRect=region
@@ -543,6 +563,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         lock.lock();defer{lock.unlock()}
         return frame.map{Snapshot(buffer:$0,rect:frameRect)}
     }
+    #if SELF_TEST
     @MainActor func interruptForSelfTest(_ error:NSError,sourceID:UUID?) {
         guard RunMode.selfTest,let sourceID,sourceID==activeID else{return}
         failed(error,serial:requestSerial)
@@ -552,4 +573,5 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         acceptSnapshot(snapshot)
         if !model.capturing {model.capturing=true}
     }
+    #endif
 }

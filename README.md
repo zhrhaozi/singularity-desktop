@@ -179,18 +179,20 @@ open dist/奇点.app
 1.2.9 的原生测试增加区域与全屏映射的逐像素比较、真实多显示器切换、区域/刷新率更新、快速移动与暂停竞态、迟到截图以及请求超时后的流回退。还应单独运行兼容路径：
 
 ```sh
-SINGULARITY_CAPTURE_BACKEND=stream ./scripts/test-native.sh
+SINGULARITY_CAPTURE_BACKEND=stream ./scripts/test-native.sh --live-capture
 ```
 
 1.2.10 增加 nil 屏幕唤醒、同屏恢复、短时等待、取消恢复、截图回退后的显式重试和防振荡原生检查；使用合成 Codex 探针验证隐藏零轮询、设置窗口可见/最小化/关闭、显示恢复和睡眠约束。逻辑测试另外覆盖任务计时延续、结果不重播、失败退避、文件优先级与恢复后的过期保护，不访问个人对话。
 
 1.3.0 增加双体、三体各一小时模拟测试，覆盖可复现重置、时间步上限、速度、运动范围、近掠和真实碰撞。GPU 测试覆盖 24 组多体/风格/尺寸组合，检查缓存与直接积分、共享纹理与 CPU 上传、背景相互扭曲、透明边缘、独立光流、碰撞脉冲、运动不重建缓存和隐藏释放。真实桌面测试还验证双体、三体暂停时持续更新背景，以及隐藏后重新显示。
 
-`SINGULARITY_BENCHMARK_MULTIBODY=1 SINGULARITY_BENCHMARK_SECONDS=120 dist/奇点.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 依次测量隐藏、单体、双体、三体，每段先预热 15 秒。它固定 Codex 为长任务视觉状态并关闭真实状态探测，日志记录帧率、采集次数和缓存重建次数；进程 CPU、GPU、温度和风扇需独立采样，不能仅由帧率推断。性能测试期间临时锁定设置和鼠标交互，退出测试进程后正常启动即可恢复；测试不保存偏好，隐藏段要求零绘制、零采集，外观或模式受到干扰时立即报告失败。
+`SINGULARITY_BENCHMARK_MULTIBODY=1 SINGULARITY_BENCHMARK_SECONDS=120 .build/native/SingularityQA.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 依次测量隐藏、单体、双体、三体，每段先预热 15 秒。它固定 Codex 为长任务视觉状态并关闭真实状态探测，日志记录帧率、采集次数和缓存重建次数；进程 CPU、GPU、温度和风扇需独立采样，不能仅由帧率推断。性能测试期间临时锁定设置和鼠标交互，退出测试进程后正常启动即可恢复；测试不保存偏好，隐藏段要求零绘制、零采集，外观或模式受到干扰时立即报告失败。
 
-`SINGULARITY_BENCHMARK_BACKEND=1 dist/奇点.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 在同一进程中交替比较持续流 30 FPS 与默认自适应区域截图，动画均为 30 FPS；日志输出阶段边界，进程资源和风扇需要另行测量。改用 `SINGULARITY_BENCHMARK_ADAPTIVE=1` 可对比固定 10 FPS 与自适应截图，并记录像素比较耗时。测试不保存用户偏好。
+`SINGULARITY_BENCHMARK_BACKEND=1 .build/native/SingularityQA.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 在同一进程中交替比较持续流 30 FPS 与默认自适应区域截图，动画均为 30 FPS；日志输出阶段边界，进程资源和风扇需要另行测量。改用 `SINGULARITY_BENCHMARK_ADAPTIVE=1` 可对比固定 10 FPS 与自适应截图，并记录像素比较耗时。测试不保存用户偏好。
 
-`--self-test` 使用在 `-O` 下仍生效的显式检查，失败返回非零退出码，结束后自动退出，不保存设置或位置，也不读取 Codex 状态。测试覆盖窗口尺寸、位置、显示隐藏、实际 GLSL 链接、48 组状态/风格/像素尺寸的 GPU 读回、阴影、透明边缘、动画暂停恢复及采集重连。生成的 PNG 仅使用无桌面背景的渲染，不含用户屏幕内容。已有录屏权限时还会测试真实屏幕采集；无权限时明确标记跳过。`scripts/test-native.sh` 额外验证故意失败会被正确报告。
+原生 GPU/采集测试只编进独立的 `SingularityQA.app`（用 `./scripts/build-self-test.sh` 构建），与正式应用使用不同标识。`./scripts/test-native.sh` 默认只用生成的画面；在明确同意真实屏幕采集并授权测试应用后，才使用 `./scripts/test-native.sh --live-capture`。正式包拒绝 `--self-test`，仅保留不访问屏幕的 `--capture-policy-test`。
+
+QA 的 `--self-test` 使用在 `-O` 下仍生效的显式检查，失败返回非零退出码，结束后自动退出，不保存设置或位置，也不读取 Codex 状态。测试覆盖窗口尺寸、位置、显示隐藏、实际 GLSL 链接、48 组状态/风格/像素尺寸的 GPU 读回、阴影、透明边缘、动画暂停恢复及采集重连。生成的 PNG 仅使用无桌面背景的渲染，不含用户屏幕内容。已有录屏权限时还会测试真实屏幕采集；无权限时明确标记跳过。`scripts/test-native.sh` 额外验证故意失败会被正确报告。
 
 1.4.0 的逻辑回归还覆盖损坏偏好、只写入变动字段、旧版迁移、离线模式零桌面请求、选择撤销后的迟到回调、简短警报与普通文本的区分。离屏 UI 验证可执行 `./scripts/test-settings.sh`，它用独立测试应用导出五个真实设置页及条件状态，不读取屏幕。渲染自测额外检查资源缺失、编译错误与链接失败。
 

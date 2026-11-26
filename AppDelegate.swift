@@ -105,7 +105,9 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
             }
         }
         log("APP_READY")
+        #if SELF_TEST
         if RunMode.selfTest {runSelfTest()}
+        #endif
     }
     func makeSettingsWindow() -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 680),
@@ -229,10 +231,12 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
         await capture.resume(reason,screen:pet.screen ?? NSScreen.main)
     }
     func checkScreen(){guard capture.wantsCapture,let s=pet.screen ?? NSScreen.main else{return};Task{@MainActor in await capture.retarget(screen:s)}}
+    #if SELF_TEST
     func runSelfTest() {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             await NativeSelfTest.run(self)
         }
     }
+    #endif
 }

@@ -82,7 +82,11 @@ final class PetView:NSOpenGLView {
     }
     private(set) var renderingActive=true
     private let geometryCachingEnabled=ProcessInfo.processInfo.environment["SINGULARITY_DISABLE_GEOMETRY_CACHE"] != "1"
-    var benchmarkDirectGeometry=false
+    #if SELF_TEST
+    var benchmarkDirectGeometry = false
+    #else
+    private let benchmarkDirectGeometry = false
+    #endif
     private var renderedWindowFrame=CGRect.zero
     private var requestedCaptureFrame=CGRect.zero
     private var renderedCapture=false

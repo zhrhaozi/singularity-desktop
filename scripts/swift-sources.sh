@@ -14,5 +14,5 @@ APP_SOURCES=(
     RenderCache.swift
     MultiLensRenderer.swift
     OrbitalSystem.swift
-    NativeSelfTest.swift
+    CapturePolicyDiagnostic.swift
 )
