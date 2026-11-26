@@ -1,4 +1,5 @@
 import Cocoa
+import Combine
 import SwiftUI
 
 let model = Model(defaults: RunMode.selfTest ? nil : .standard)
