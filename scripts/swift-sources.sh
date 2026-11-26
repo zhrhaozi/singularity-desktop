@@ -5,8 +5,10 @@ APP_SOURCES=(
     Model.swift
     CaptureLog.swift
     Capture.swift
+    GlobalShortcuts.swift
     GLProgram.swift
     PetView.swift
+    LivePreview.swift
     SettingsView.swift
     AppDelegate.swift
     Behavior.swift

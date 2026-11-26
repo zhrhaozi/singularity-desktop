@@ -7,6 +7,9 @@ enum SettingsTab: String, CaseIterable {
 
 enum PetChoices {
     static let styles = ["炽金", "冷蓝", "星环", "纯透镜"]
+    static let thumbnails: [NSImage?] = styles.indices.map { i in
+        Bundle.main.url(forResource: "style-thumb-\(i)", withExtension: "png").flatMap(NSImage.init(contentsOf:))
+    }
     static let systems = ["单体", "双体", "三体"]
 }
 
@@ -75,7 +78,6 @@ struct SettingsView: View {
     private let accent = Color(red: 0.94, green: 0.73, blue: 0.43)
     private let muted = Color.white.opacity(0.70)
     private let backdrop = Color(red: 0.055, green: 0.06, blue: 0.075)
-    private static let icon = Bundle.main.url(forResource: "AppIcon", withExtension: "icns").flatMap(NSImage.init(contentsOf:))
     private let palette = [("炽金", "#FFAA55"), ("霓虹紫", "#8A5CFF"), ("青蓝", "#4FD1FF"), ("玫红", "#FF4D6D"),
                            ("极光绿", "#7CFFB2"), ("白色", "#FFFFFF"), ("淡金", "#FFD86B"), ("橙色", "#FF7A1A")]
 
@@ -88,21 +90,18 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.horizontal, 24).padding(.top, 19)
             if !state.rendererError.isEmpty { warning(state.rendererError).padding(.horizontal, 24).padding(.top, 10) }
-            TabView(selection: $tab) {
-                ForEach(SettingsTab.allCases, id: \.self) { page in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 12) {
-                            switch page {
-                            case .appearance: appearance
-                            case .motion: motion
-                            case .codex: codex
-                            case .lens: lens
-                            case .about: about
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                    }.tabItem { Text(page.rawValue) }.tag(page)
-                }
-            }.padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
+            // The automatic macOS 15+ TabView expects a SwiftUI scene toolbar. This
+            // AppKit-owned window instead exposes the same selection with native segments.
+            Picker("设置分类", selection: $tab) {
+                ForEach(SettingsTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("设置分类")
+                .padding(.horizontal, 24).padding(.vertical, 12)
+            Divider()
+            if #available(macOS 15, *) {
+                TabView(selection: $tab) { ForEach(SettingsTab.allCases, id: \.self) { page in tabPage(page).tag(page) } }
+            } else {
+                tabPage(tab).id(tab)
+            }
         }
         .frame(minWidth: 520, minHeight: 600).background(backdrop)
         .labeledContentStyle(TrailingFieldStyle()).preferredColorScheme(.dark).accentColor(accent).tint(accent).toggleStyle(.switch)
@@ -121,23 +120,44 @@ struct SettingsView: View {
         }
     }
 
+    private func tabPage(_ page: SettingsTab) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                switch page {
+                case .appearance:
+                    if state.needsOnboarding { onboarding }
+                    appearance
+                case .motion: motion
+                case .codex: codex
+                case .lens: lens
+                case .about: about
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 14)
+        }
+    }
+
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                if let icon = Self.icon { Image(nsImage: icon).resizable().interpolation(.high).frame(width: 54, height: 54).accessibilityHidden(true) }
-                VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 16) {
+            LivePreview(state: state).frame(width: 120, height: 120)
+                .background(Color(white: 0.035), in: RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .help("实时显示当前参数；预览不采集桌面。")
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("奇点").font(.system(size: 26, weight: .medium, design: .serif))
                     Text("Singularity").font(.system(size: 12)).foregroundStyle(muted)
                 }
-                Spacer()
-                Button { state.paused.toggle() } label: { Label(state.paused ? "继续流动" : "暂停流动", systemImage: state.paused ? "play.fill" : "pause.fill") }
-                Button { appDelegate?.togglePet() } label: { Label(state.visible ? "隐藏" : "显示", systemImage: state.visible ? "eye.slash" : "eye") }
-                    .help(state.visible ? "隐藏桌宠并暂停桌面采样" : "重新显示桌宠")
+                HStack(spacing: 6) {
+                    statusLink(state.capturing ? "透镜已连接" : "透镜未连接", symbol: state.capturing ? "checkmark.circle.fill" : "circle.dashed", color: state.capturing ? .green : muted, target: .lens)
+                    statusLink("Codex · " + (state.codexState.label.components(separatedBy: " · ").first ?? state.codexState.token), symbol: "circle.hexagongrid", color: state.codexState == .error ? .orange : accent, target: .codex)
+                }
+                HStack {
+                    Button { state.paused.toggle() } label: { Label(state.paused ? "继续流动" : "暂停流动", systemImage: state.paused ? "play.fill" : "pause.fill") }
+                    Button { appDelegate?.togglePet() } label: { Label(state.visible ? "隐藏" : "显示", systemImage: state.visible ? "eye.slash" : "eye") }
+                        .help(state.visible ? "隐藏桌宠并暂停桌面采样" : "重新显示桌宠")
+                }
             }
-            HStack(spacing: 16) {
-                statusLink(state.capturing ? "透镜已连接" : "透镜未连接", symbol: state.capturing ? "checkmark.circle.fill" : "circle.dashed", color: state.capturing ? .green : muted, target: .lens)
-                statusLink("Codex · " + (state.codexState.label.components(separatedBy: " · ").first ?? state.codexState.token), symbol: "circle.hexagongrid", color: state.codexState == .error ? .orange : accent, target: .codex)
-            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -180,11 +200,27 @@ struct SettingsView: View {
 
     @ViewBuilder private var appearance: some View {
         section("外观参数") {
-            LabeledContent("吸积盘风格") {
-                Picker("吸积盘风格", selection: $state.style) {
-                    ForEach(PetChoices.styles.indices, id: \.self) { Text(PetChoices.styles[$0]).tag($0) }
-                }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 280)
-            }
+            HStack(spacing: 6) {
+                ForEach(PetChoices.styles.indices, id: \.self) { i in
+                    let selected = state.style == i
+                    Button { state.style = i } label: {
+                        VStack(spacing: 3) {
+                            if let image = PetChoices.thumbnails[i] {
+                                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                                    .frame(maxWidth: .infinity).frame(height: 43).clipped()
+                            }
+                            HStack(spacing: 3) {
+                                if selected { Image(systemName: "checkmark").imageScale(.small) }
+                                Text(PetChoices.styles[i])
+                            }.font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                .foregroundStyle(selected ? accent : .white).padding(.bottom, 5)
+                        }.frame(maxWidth: .infinity).background(Color.black.opacity(0.36))
+                            .clipShape(RoundedRectangle(cornerRadius: 7))
+                            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(selected ? accent : .white.opacity(0.12), lineWidth: selected ? 1.5 : 1))
+                    }.buttonStyle(.plain).accessibilityLabel("吸积盘风格：" + PetChoices.styles[i])
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }.accessibilityElement(children: .contain).accessibilityLabel("吸积盘风格")
             dial("黑洞大小", $state.size, SettingsSpec.size, "\(Int(state.size)) pt")
             dial("引力透镜", $state.lens, SettingsSpec.lens, String(format: "%.1f", state.lens))
             dial("吸积盘亮度", $state.brightness, SettingsSpec.brightness, String(format: "%.1f", state.brightness))
@@ -262,8 +298,9 @@ struct SettingsView: View {
         }
         section("流动与漫游") {
             dial("流动速度", $state.speed, SettingsSpec.speed, String(format: "%.1f×", state.speed))
-            switchRow("桌面随机漫游", $state.wander)
-            if state.wander { dial("移动速度", $state.travelSpeed, SettingsSpec.travelSpeed, "\(Int(state.travelSpeed)) pt/s") }
+            switchRow("桌面随机漫游", Binding(get: { state.effectiveWander }, set: { state.wander = $0 })).disabled(state.reduceMotion)
+            if state.reduceMotion { note("系统已开启“减少动态效果”：漫游暂停，流动以所选速度的 40% 播放。关闭后恢复原设置。") }
+            if state.effectiveWander { dial("移动速度", $state.travelSpeed, SettingsSpec.travelSpeed, "\(Int(state.travelSpeed)) pt/s") }
             note("漫游限于当前屏幕。鼠标靠近、拖动或打开设置时暂停；关闭设置后继续。")
         }
     }
@@ -348,6 +385,18 @@ struct SettingsView: View {
         }
     }
 
+    private var onboarding: some View {
+        section("初次使用") {
+            Label("1、想看真实桌面透镜，可到“桌面透镜”允许录屏；不授权也能用桌宠。", systemImage: "display")
+            Label("2、把鼠标放在黑洞上，按住并拖到喜欢的位置。", systemImage: "hand.draw")
+            Label("3、双击黑洞打开设置，或点右键选择常用操作。", systemImage: "cursorarrow.click")
+            HStack {
+                Button("查看桌面透镜") { tab = .lens }
+                Spacer()
+                Button("知道了") { state.finishOnboarding() }.accessibilityLabel("关闭初次使用引导")
+            }
+        }.font(.system(size: 12))
+    }
     @ViewBuilder private var about: some View {
         section("奇点 · Singularity") {
             LabeledContent("版本", value: RunMode.version)
@@ -357,6 +406,10 @@ struct SettingsView: View {
             LabeledContent("移动桌宠", value: "拖动黑洞")
             LabeledContent("打开设置", value: "双击黑洞，或在应用内按 ⌘ ,")
             LabeledContent("快捷操作", value: "右键黑洞或点按菜单栏图标")
+            ForEach(PetShortcut.allCases, id: \.rawValue) { action in
+                LabeledContent(action.title, value: state.unavailableShortcutIDs.contains(action.rawValue) ? action.label + "（不可用）" : action.label)
+            }
+            Button("再看初次使用引导") { state.showOnboarding(); tab = .appearance }
             note("暂停会停止流动、公转和漫游；隐藏还会暂停桌面采样。")
         }
         section("默认设置") { Button("恢复全部默认设置…") { confirmReset = true } }

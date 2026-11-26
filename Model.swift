@@ -80,6 +80,13 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var codexSource = CodexLinkMode.file.waitingLabel
     @Published var codexDetail = ""
     @Published var codexPulse: Double = 0
+    @Published var reduceMotion = false  // System policy, not a saved user preference.
+    var effectiveWander: Bool { wander && !reduceMotion }
+    var effectiveFlowSpeed: Double { speed * (reduceMotion ? 0.4 : 1) }
+    @Published var unavailableShortcutIDs: Set<UInt32> = []
+    @Published private(set) var needsOnboarding = false
+    func showOnboarding() { needsOnboarding = true }
+    func finishOnboarding() { needsOnboarding = false; defaults?.set(true, forKey: "onboarded") }
     @Published var paused = false { didSet { changes.send(.redraw) } }
     @Published var visible = true
     @Published var captureState = "尚未开启桌面透镜"
@@ -99,6 +106,7 @@ final class Model: ObservableObject, CodexStateModel {
     init(defaults: UserDefaults? = .standard) {
         self.defaults = defaults
         let reader = PreferenceReader(defaults: defaults)
+        needsOnboarding = defaults != nil && !reader.flag("onboarded")
         size = reader.value(SettingsSpec.size)
         bodyCount = reader.value(SettingsSpec.bodyCount)
         orbitSpeed = reader.value(SettingsSpec.orbitSpeed)

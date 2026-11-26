@@ -35,6 +35,15 @@ do {
     expect(Model(defaults: defaults).codexMode == .desktop, "explicit new source choice persists")
     repaired.reset(); repaired.flushPreferences()
     expect(Model(defaults: defaults).codexMode == .file && repaired.customRGB == .amber, "reset restores safe source and color")
+    expect(repaired.needsOnboarding, "first launch offers the three steps")
+    repaired.finishOnboarding()
+    expect(!Model(defaults: defaults).needsOnboarding, "dismissal survives launch")
+    repaired.showOnboarding(); expect(repaired.needsOnboarding, "guide can be reopened")
+    repaired.finishOnboarding(); repaired.reset(); expect(!Model(defaults: defaults).needsOnboarding, "appearance reset does not replay onboarding")
+    repaired.speed = 1.4; repaired.wander = true; repaired.flushPreferences(); repaired.reduceMotion = true
+    expect(!repaired.effectiveWander && abs(repaired.effectiveFlowSpeed - 0.56) < 1e-10, "system policy suppresses wandering and slows flow")
+    repaired.reduceMotion = false
+    expect(repaired.effectiveWander && repaired.effectiveFlowSpeed == 1.4 && defaults.bool(forKey: "wander"), "disabling policy restores saved choices")
     print("PASS: preference validation, legacy migration, RGB cache, isolated per-key writes and reset")
 }
 let screen=CGRect(x:-1600,y:50,width:1600,height:1000)

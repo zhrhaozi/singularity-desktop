@@ -96,9 +96,11 @@ final class PetView:NSOpenGLView {
     var wanderState=Wander()
     var lastTick=ProcessInfo.processInfo.systemUptime
     var lastSave=ProcessInfo.processInfo.systemUptime
-    let capture:Capture
-    init?(frame:NSRect,capture:Capture) {
-        self.capture=capture
+    let capture: Capture
+    private let model: Model
+    private let preview: Bool
+    init?(frame: NSRect, capture: Capture, state: Model, preview: Bool = false) {
+        self.capture = capture; self.model = state; self.preview = preview
         let attrs:[NSOpenGLPixelFormatAttribute]=[UInt32(NSOpenGLPFAOpenGLProfile),UInt32(NSOpenGLProfileVersion3_2Core),UInt32(NSOpenGLPFAAccelerated),UInt32(NSOpenGLPFADoubleBuffer),UInt32(NSOpenGLPFAColorSize),24,UInt32(NSOpenGLPFAAlphaSize),8,0]
         guard let format = NSOpenGLPixelFormat(attributes: attrs) ?? NSOpenGLPixelFormat(attributes: attrs.filter { $0 != UInt32(NSOpenGLPFAAccelerated) }) else { return nil }
         super.init(frame: frame, pixelFormat: format)
@@ -110,6 +112,7 @@ final class PetView:NSOpenGLView {
     override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
     override func prepareOpenGL() {
         super.prepareOpenGL();openGLContext?.makeCurrentContext()
+        if program != 0 { return }
         if model.bodyCount > 1 {resetOrbits()}
         var opaque:GLint=0;openGLContext?.setValues(&opaque,for:.surfaceOpacity)
         var swap:GLint=1;openGLContext?.setValues(&swap,for:.swapInterval)
@@ -128,13 +131,14 @@ final class PetView:NSOpenGLView {
             program = 0
             timer?.invalidate(); timer = nil
             log("GL_INIT_FAILED \(error)")
+            guard !preview else { return }
             model.rendererError = "图形渲染未能启动。请重新打开奇点；如果仍然失败，请使用完整的应用包重新安装。"
             Task { @MainActor in await capture.start(screen: nil) }
             return
         }
         glGenVertexArrays(1,&vao);glBindVertexArray(vao)
         cacheUniformLocations()
-        if let context=openGLContext?.cglContextObj,let format=pixelFormat?.cglPixelFormatObj {
+        if !preview,let context=openGLContext?.cglContextObj,let format=pixelFormat?.cglPixelFormatObj {
             let result=CVOpenGLTextureCacheCreate(kCFAllocatorDefault,nil,context,format,nil,&desktopCache)
             if result != kCVReturnSuccess {log("DESKTOP_CACHE_UNAVAILABLE code=\(result)")}
         }
@@ -150,7 +154,16 @@ final class PetView:NSOpenGLView {
         glTexParameteri(GLenum(GL_TEXTURE_RECTANGLE),GLenum(GL_TEXTURE_WRAP_T),GL_CLAMP_TO_EDGE)
         pixels.withUnsafeBytes{glTexImage2D(GLenum(GL_TEXTURE_RECTANGLE),0,GL_RGBA8,1,1,0,GLenum(GL_BGRA),GLenum(GL_UNSIGNED_BYTE),$0.baseAddress)}
         glActiveTexture(GLenum(GL_TEXTURE0))
-        setRenderingActive(renderingActive)
+        if !preview { setRenderingActive(renderingActive) }
+    }
+    func disposePreview() {
+        guard preview else { return }
+        geometryCache?.release()
+        if let id = geometryCache?.program, id != 0 { glDeleteProgram(id) }
+        geometryCache = nil; multiLens.dispose()
+        if program != 0 { glDeleteProgram(program); program = 0 }
+        glDeleteTextures(1, &textureID); glDeleteTextures(1, &emptySurfaceTexture)
+        glDeleteVertexArrays(1, &vao)
     }
     func setRenderingActive(_ active:Bool) {
         renderingActive=active
@@ -223,14 +236,14 @@ final class PetView:NSOpenGLView {
         codexEnergySmooth += (energy-codexEnergySmooth)*alpha
         codexTrailSmooth += (trail-codexTrailSmooth)*alpha
         codexParticlesSmooth += (particles-codexParticlesSmooth)*alpha
-        clock += Float(model.speed*dt)
+        clock += Float(model.effectiveFlowSpeed*dt)
         let spinDirection=(model.hasSpin && model.spin < 0) ? -1.0 : 1.0
         // Keep the old visual rates (the shader's disk wind was 5 rad/s at 1x)
         // while integrating state-dependent terms here, where they cannot jump
         // by multiplying a long-lived clock with a newly observed state.
-        diskPhase += Float(model.speed*dt*5.0*(1.0+0.34*Double(codexEnergySmooth))*spinDirection)
-        dustPhase += Float(model.speed*dt*(0.18+0.88*Double(codexEnergySmooth)))
-        if model.codexPulse > 0 { model.codexPulse=max(0,model.codexPulse-dt*2.2) }
+        diskPhase += Float(model.effectiveFlowSpeed*dt*5.0*(1.0+0.34*Double(codexEnergySmooth))*spinDirection)
+        dustPhase += Float(model.effectiveFlowSpeed*dt*(0.18+0.88*Double(codexEnergySmooth)))
+        if !preview && model.codexPulse > 0 { model.codexPulse=max(0,model.codexPulse-dt*2.2) }
     }
     func tick() {
         let now=ProcessInfo.processInfo.systemUptime
@@ -243,14 +256,14 @@ final class PetView:NSOpenGLView {
         if model.bodyCount > 1 && !model.paused && !dragging && !hovering {
             orbits?.advance(dt:dt,speed:model.orbitSpeed)
         }
-        if model.wander && !model.paused && !dragging && !hovering && !(appDelegate?.settings?.isVisible ?? false),let screen=w.screen {
+        if model.effectiveWander && !model.paused && !dragging && !hovering && !(appDelegate?.settings?.isVisible ?? false),let screen=w.screen {
             w.setFrameOrigin(wanderState.advance(origin:w.frame.origin,size:w.frame.size,screen:screen.visibleFrame,speed:model.travelSpeed,dt:dt))
             if now-lastSave>5 {appDelegate?.savePosition();lastSave=now}
         }
         if !dragging && !RunMode.selfTest {
             let point=convert(pointer,from:nil)
             let ignores = !hitsBody(point,margin:0.27)
-            if w.ignoresMouseEvents != ignores {w.ignoresMouseEvents=ignores}
+            if w.ignoresMouseEvents != ignores { w.ignoresMouseEvents = ignores; w.invalidateCursorRects(for: self) }
         }
         if w.frame != requestedCaptureFrame {
             requestedCaptureFrame=w.frame
@@ -389,12 +402,29 @@ final class PetView:NSOpenGLView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties();openGLContext?.update();needsDisplay=true
     }
-    override func mouseDown(with event:NSEvent) {
-        if event.clickCount==2 {appDelegate?.showSettings();return}
-        log("DRAG_BEGIN");dragging=true;dragStart=NSEvent.mouseLocation;originStart=window!.frame.origin
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        guard window?.ignoresMouseEvents == false else { return }
+        addCursorRect(bounds, cursor: dragging ? .closedHand : .openHand)
+    }
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 2 { appDelegate?.showSettings(); return }
+        guard let window else { return }
+        dragging = true; dragStart = NSEvent.mouseLocation; originStart = window.frame.origin
+        NSCursor.closedHand.set(); window.invalidateCursorRects(for: self)
         appDelegate?.checkScreen()
     }
-    override func mouseDragged(with event:NSEvent) {let p=NSEvent.mouseLocation;window?.setFrameOrigin(NSPoint(x:originStart.x+p.x-dragStart.x,y:originStart.y+p.y-dragStart.y))}
-    override func mouseUp(with event:NSEvent) {dragging=false;log("DRAG_END x=\(window!.frame.minX) y=\(window!.frame.minY)");appDelegate?.savePosition();appDelegate?.screenParametersChanged()}
+    override func mouseDragged(with event: NSEvent) {
+        guard dragging else { return }
+        let p = NSEvent.mouseLocation
+        window?.setFrameOrigin(NSPoint(x: originStart.x + p.x - dragStart.x, y: originStart.y + p.y - dragStart.y))
+    }
+    override func mouseUp(with event: NSEvent) {
+        guard dragging else { return }
+        dragging = false
+        if hitsBody(convert(event.locationInWindow, from: nil), margin: 0.27) { NSCursor.openHand.set() }
+        window?.invalidateCursorRects(for: self)
+        appDelegate?.savePosition(); appDelegate?.screenParametersChanged()
+    }
     override func rightMouseDown(with event:NSEvent) {if let menu=appDelegate?.makeMenu(){NSMenu.popUpContextMenu(menu,with:event,for:self)}}
 }

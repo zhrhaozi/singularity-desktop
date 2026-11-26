@@ -53,6 +53,12 @@ final class MultiLensRenderer {
         dimensions = .zero
     }
 
+    /// Unlike hiding a reusable pet, discarding a preview also retires its compositor program.
+    func dispose() {
+        release(); caches.removeAll()
+        if program != 0 { glDeleteProgram(program); program = 0 }
+    }
+
     private func prepare(width: GLsizei, height: GLsizei, geometryProgram: GLuint) -> Bool {
         guard available, width > 0, height > 0 else { return false }
         if program == 0 {

@@ -1,13 +1,13 @@
 import Cocoa
 
-if CommandLine.arguments.contains("--capture-policy-test") {
+if RunMode.capturePolicyTest {
     CapturePolicyDiagnostic.run()
     exit(0)
 }
 #if SELF_TEST
 guard RunMode.selfTest else { fputs("This QA application requires --self-test.\n", stderr); exit(64) }
 #else
-if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--self-test") }) {
+if RunMode.containsQAOptions {
     fputs("原生自测只在独立的 QA 构建中提供。\n", stderr); exit(64)
 }
 #endif

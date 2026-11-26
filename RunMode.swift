@@ -11,6 +11,8 @@ enum RunMode {
     static let performance = false
     static let renderOnly = false
     #endif
+    static let capturePolicyTest = arguments.contains("--capture-policy-test")
+    static let containsQAOptions = arguments.contains { $0.hasPrefix("--self-test") }
     static let petOnly = arguments.contains("--pet-only")
     static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
 }

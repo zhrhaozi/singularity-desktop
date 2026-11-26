@@ -12,6 +12,7 @@ let coordinator = AppDelegate()
 let actualWindow = coordinator.makeSettingsWindow()
 precondition(actualWindow.styleMask.contains(.resizable) && actualWindow.level == .normal)
 precondition(actualWindow.contentMinSize == NSSize(width: 520, height: 600))
+precondition(PetChoices.thumbnails.count == 4 && PetChoices.thumbnails.allSatisfy { $0?.isValid == true })
 let menu = coordinator.makeMenu()
 model.bodyCount = 2; model.style = 1; model.paused = true
 coordinator.menuNeedsUpdate(menu)
@@ -28,6 +29,14 @@ func snap(_ name: String, _ tab: SettingsTab, width: CGFloat = 520, height: CGFl
     window.appearance = NSAppearance(named: .darkAqua); host.appearance = window.appearance
     window.contentView = host
     host.layoutSubtreeIfNeeded(); RunLoop.main.run(until: Date().addingTimeInterval(0.23)); host.layoutSubtreeIfNeeded()
+    func findPreview(_ view: NSView) -> PreviewImageView? {
+        if let p = view as? PreviewImageView { return p }
+        return view.subviews.lazy.compactMap(findPreview).first
+    }
+    guard let preview = findPreview(host) else { fatalError("missing native preview") }
+    precondition(!preview.isAnimating, "offscreen does not run a timer")
+    preview.renderStillForQA(); precondition(preview.frameCount == 1, "real GPU still, not the fallback icon")
+    host.layoutSubtreeIfNeeded()
     precondition(host.bounds.size == rect.size)
     guard let image = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { fatalError("no backing store") }
     host.cacheDisplay(in: host.bounds, to: image)
@@ -46,6 +55,8 @@ try snap("lens", .lens) {
     $0.captureState = "需要屏幕录制权限"; $0.error = "请在系统设置中允许「奇点」，再点「连接透镜」。"
 }
 try snap("lens-connected", .lens) { $0.capturing = true; $0.captureAuthorized = true }
+try snap("onboarding", .appearance) { $0.showOnboarding() }
+try snap("reduce-motion", .motion) { $0.reduceMotion = true; $0.wander = true }
 try snap("about", .about)
 precondition(AppDelegate.statusSymbol(connected: true, activity: .idle) != AppDelegate.statusSymbol(connected: false, activity: .idle))
 for activity in CodexActivityState.allCases { precondition(NSImage(systemSymbolName: AppDelegate.statusSymbol(connected: true, activity: activity), accessibilityDescription: nil) != nil) }

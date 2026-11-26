@@ -11,6 +11,8 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
     var view:PetView!
     var settings:NSWindow!
     var status:NSStatusItem!
+    private var hotkeys: GlobalShortcuts?
+    private var motionObserver: NSObjectProtocol?
     private var statusObservation: AnyCancellable?
     let capture=Capture()
     var codexBridge:CodexStateBridge?
@@ -44,7 +46,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
         let size=model.sceneSize
         pet=PetWindow(contentRect:NSRect(x:500,y:300,width:size,height:size),styleMask:[.borderless,.nonactivatingPanel],backing:.buffered,defer:false)
         pet.title="奇点桌面宠物";pet.isOpaque=false;pet.backgroundColor = .clear;pet.hasShadow=false;pet.level = .floating;pet.hidesOnDeactivate=false;pet.collectionBehavior=[.canJoinAllSpaces,.fullScreenAuxiliary];pet.isReleasedWhenClosed=false
-        guard let renderer = PetView(frame: NSRect(x: 0, y: 0, width: size, height: size), capture: capture) else {
+        guard let renderer = PetView(frame: NSRect(x: 0, y: 0, width: size, height: size), capture: capture, state: model) else {
             log("GL_PIXEL_FORMAT_UNAVAILABLE")
             if RunMode.selfTest { exit(1) }
             let alert = NSAlert()
@@ -72,6 +74,18 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
             self?.status.button?.toolTip = desc
         }
         status.menu = makeMenu()
+        if !RunMode.selfTest {
+            model.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            motionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main
+            ) { _ in model.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+            let shortcuts = GlobalShortcuts { [weak self] action in
+                switch action { case .visibility: self?.togglePet(); case .pause: self?.togglePause() }
+            }
+            hotkeys = shortcuts
+            let available = shortcuts.start()
+            model.unavailableShortcutIDs = Set(PetShortcut.allCases.filter { !available.contains($0) }.map(\.rawValue))
+        }
         if !RunMode.petOnly { showSettings() }
         if !RunMode.selfTest {
             codexBridge=CodexStateBridge(model:model)
@@ -199,7 +213,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
         if notification.object as? NSWindow === settings {restartCodexBridge()}
     }
     @objc func about(){NSApp.orderFrontStandardAboutPanel(options:[.applicationName:"奇点 · Singularity",.applicationVersion:RunMode.version,.credits:NSAttributedString(string:"引力透镜着色器基于 s0xDk/ghostty-blackhole；多体运动使用 Chipmunk2D（MIT）。")])}
-    func applicationWillTerminate(_ notification:Notification){ if pendingResize != nil { resizePet() }; model.flushPreferences(); savePosition() }
+    func applicationWillTerminate(_ notification:Notification){ hotkeys?.stop(); if let motionObserver { NSWorkspace.shared.notificationCenter.removeObserver(motionObserver) }; if pendingResize != nil { resizePet() }; model.flushPreferences(); savePosition() }
     @objc func quit(){savePosition();NSApp.terminate(nil)}
     @objc func togglePet(){
         model.visible.toggle()
