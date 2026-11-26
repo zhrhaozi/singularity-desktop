@@ -11,6 +11,7 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
     var view:PetView!
     var settings:NSWindow!
     var status:NSStatusItem!
+    private var statusObservation: AnyCancellable?
     let capture=Capture()
     var codexBridge:CodexStateBridge?
     private var preferenceObservation: AnyCancellable?
@@ -62,7 +63,14 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
         pet.orderFrontRegardless()
         settings = makeSettingsWindow()
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        status.button?.image = NSImage(systemSymbolName: "circle.circle.fill", accessibilityDescription: "奇点")
+        statusObservation = model.$capturing.combineLatest(model.$codexState).sink { [weak self] connected, activity in
+            let name = Self.statusSymbol(connected: connected, activity: activity)
+            let desc = "奇点 · \(connected ? "透镜已连接" : "透镜未连接") · \(activity.label)"
+            let image = NSImage(systemSymbolName: name, accessibilityDescription: desc)
+            image?.isTemplate = true
+            self?.status.button?.image = image
+            self?.status.button?.toolTip = desc
+        }
         status.menu = makeMenu()
         if !RunMode.petOnly { showSettings() }
         if !RunMode.selfTest {
@@ -110,6 +118,20 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
         #if SELF_TEST
         if RunMode.selfTest {runSelfTest()}
         #endif
+    }
+    static func statusSymbol(connected: Bool, activity: CodexActivityState) -> String {
+        switch activity {
+        case .idle: return connected ? "circle.circle.fill" : "circle.dashed"
+        case .thinking: return "sparkles"
+        case .command: return "terminal"
+        case .longTask: return "hourglass"
+        case .complete: return "checkmark.circle"
+        case .error: return "exclamationmark.circle"
+        }
+    }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard !RunMode.selfTest else { return }
+        model.captureAuthorized = CGPreflightScreenCaptureAccess()
     }
     func makeSettingsWindow() -> NSWindow {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 790),

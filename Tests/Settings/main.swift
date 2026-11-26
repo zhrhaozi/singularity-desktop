@@ -45,5 +45,8 @@ try snap("codex-manual", .codex, width: 520, height: 600) {
 try snap("lens", .lens) {
     $0.captureState = "需要屏幕录制权限"; $0.error = "请在系统设置中允许「奇点」，再点「连接透镜」。"
 }
+try snap("lens-connected", .lens) { $0.capturing = true; $0.captureAuthorized = true }
 try snap("about", .about)
+precondition(AppDelegate.statusSymbol(connected: true, activity: .idle) != AppDelegate.statusSymbol(connected: false, activity: .idle))
+for activity in CodexActivityState.allCases { precondition(NSImage(systemSymbolName: AppDelegate.statusSymbol(connected: true, activity: activity), accessibilityDescription: nil) != nil) }
 print("SETTINGS_QA_PASS 5 tabs, minimum window, file/manual states, menus and real SwiftUI captures")

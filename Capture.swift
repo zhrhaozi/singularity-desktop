@@ -279,7 +279,8 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         model.captureState="正在连接桌面…"
         do {
-            if !CGPreflightScreenCaptureAccess() {
+            model.captureAuthorized = CGPreflightScreenCaptureAccess()
+            if !model.captureAuthorized {
                 if requestPermission {
                     log("PERMISSION_REQUEST bundle=\(Bundle.main.bundleIdentifier ?? "unknown") path=\(Bundle.main.bundlePath)")
                 }
@@ -287,6 +288,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
                     throw NSError(domain:SCStreamErrorDomain,code:SCStreamError.Code.userDeclined.rawValue)
                 }
             }
+            model.captureAuthorized = true
             requestPermission=false
             let content=try await SCShareableContent.excludingDesktopWindows(false,onScreenWindowsOnly:true)
             guard serial == requestSerial else {return}

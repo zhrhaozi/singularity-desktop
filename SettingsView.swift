@@ -87,23 +87,22 @@ struct SettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.horizontal, 24).padding(.top, 19)
-            Picker("设置分类", selection: $tab) {
-                ForEach(SettingsTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("设置分类")
-                .padding(.horizontal, 24).padding(.vertical, 16)
-            Divider()
             if !state.rendererError.isEmpty { warning(state.rendererError).padding(.horizontal, 24).padding(.top, 10) }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    switch tab {
-                    case .appearance: appearance
-                    case .motion: motion
-                    case .codex: codex
-                    case .lens: lens
-                    case .about: about
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 16)
-            }.id(tab) // A new section always opens at its top.
+            TabView(selection: $tab) {
+                ForEach(SettingsTab.allCases, id: \.self) { page in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            switch page {
+                            case .appearance: appearance
+                            case .motion: motion
+                            case .codex: codex
+                            case .lens: lens
+                            case .about: about
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                    }.tabItem { Text(page.rawValue) }.tag(page)
+                }
+            }.padding(.horizontal, 12).padding(.top, 10).padding(.bottom, 8)
         }
         .frame(minWidth: 520, minHeight: 600).background(backdrop)
         .labeledContentStyle(TrailingFieldStyle()).preferredColorScheme(.dark).accentColor(accent).tint(accent).toggleStyle(.switch)
@@ -145,6 +144,8 @@ struct SettingsView: View {
     private func statusLink(_ text: String, symbol: String, color: Color, target: SettingsTab) -> some View {
         Button { tab = target } label: {
             Label { Text(text).foregroundStyle(muted) } icon: { Image(systemName: symbol).foregroundStyle(color) }
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(color.opacity(0.10), in: Capsule())
         }.buttonStyle(.plain).font(.system(size: 12)).help("前往" + target.rawValue)
     }
 
@@ -306,25 +307,38 @@ struct SettingsView: View {
         }
     }
 
+    private static func openScreenSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+    }
+    @ViewBuilder private var lensMore: some View {
+        Button(state.capturing ? "重新连接" : "检查权限并连接") { appDelegate?.enableCapture(retryPreferredBackend: true) }
+            .disabled(!state.visible || !state.rendererError.isEmpty)
+        Button("在访达中显示当前应用") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
+    }
     @ViewBuilder private var lens: some View {
-        section("桌面透镜") {
-            Label(state.captureState, systemImage: state.capturing ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(state.capturing ? Color.green : Color.primary)
-            if !state.capturing && !state.error.isEmpty { warning(state.error) }
-            HStack {
-                if !state.capturing && state.visible {
-                    Button("打开屏幕录制设置") {
-                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+        if state.capturing {
+            Label("桌面透镜已连接", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14).background(.green.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                .accessibilityIdentifier("lens.connected")
+                .contextMenu { lensMore }
+        } else {
+            section("桌面透镜") {
+                Label(state.captureState, systemImage: "circle.dashed")
+                if !state.error.isEmpty { warning(state.error) }
+                HStack {
+                    if !state.captureAuthorized {
+                        Button("打开屏幕录制设置", action: Self.openScreenSettings)
+                    } else {
+                        Button("连接桌面透镜") { appDelegate?.enableCapture(requestPermission: false, retryPreferredBackend: true) }
+                            .disabled(!state.visible || !state.rendererError.isEmpty)
                     }
+                    Spacer()
+                    Menu { lensMore } label: { Image(systemName: "ellipsis.circle") }
+                        .fixedSize().accessibilityLabel("更多桌面透镜选项")
                 }
-                Button(state.capturing ? "重新连接" : "连接透镜") { appDelegate?.enableCapture(retryPreferredBackend: true) }
-                    .disabled(!state.visible || !state.rendererError.isEmpty)
-                Spacer()
-                Menu { Button("在访达中显示当前应用") { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) } }
-                    label: { Image(systemName: "ellipsis.circle") }
-                    .fixedSize().accessibilityLabel("更多桌面透镜选项")
+                if !state.visible { note("先显示桌宠，再连接桌面透镜。") }
             }
-            if !state.visible { note("先显示桌宠，再连接桌面透镜。") }
         }
         section("背景刷新") {
             Picker("背景刷新频率", selection: $state.backgroundFPS) {

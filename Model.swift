@@ -83,6 +83,7 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var paused = false { didSet { changes.send(.redraw) } }
     @Published var visible = true
     @Published var captureState = "尚未开启桌面透镜"
+    @Published var captureAuthorized = false
     @Published var capturing = false
     @Published var error = "" // Screen-capture lifecycle only.
     @Published var rendererError = "" // Must survive capture-state updates.
