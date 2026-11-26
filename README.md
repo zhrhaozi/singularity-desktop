@@ -198,7 +198,9 @@ SINGULARITY_CAPTURE_BACKEND=stream ./scripts/test-native.sh --live-capture
 
 `SINGULARITY_BENCHMARK_BACKEND=1 .build/native/SingularityQA.app/Contents/MacOS/Singularity --pet-only --self-test --self-test-performance` 在同一进程中交替比较持续流 30 FPS 与默认自适应区域截图，动画均为 30 FPS；日志输出阶段边界，进程资源和风扇需要另行测量。改用 `SINGULARITY_BENCHMARK_ADAPTIVE=1` 可对比固定 10 FPS 与自适应截图，并记录像素比较耗时。测试不保存用户偏好。
 
-原生 GPU/采集测试只编进独立的 `SingularityQA.app`（用 `./scripts/build-self-test.sh` 构建），与正式应用使用不同标识。`./scripts/test-native.sh` 默认只用生成的画面；在明确同意真实屏幕采集并授权测试应用后，才使用 `./scripts/test-native.sh --live-capture`。正式包拒绝 `--self-test`，仅保留不访问屏幕的 `--capture-policy-test`。
+运行 `./scripts/check-format.sh` 检查拆分后 Swift 源码格式。在本机签名打包后，`./scripts/test-release-fixture.sh` 使用本地假 GitHub 客户端核对发布命令及拒绝条件，不上传任何内容。
+
+原生 GPU/采集测试只编进独立的 `SingularityQA.app`（用 `./scripts/build-self-test.sh` 构建），与正式应用使用不同标识。`./scripts/test-native.sh` 默认只用生成的画面，并在支持的系统用 ScreenCaptureKit 读取测试程序自己的合成色块窗口；不枚举其他应用的窗口，也不请求桌面权限。在明确同意真实屏幕采集并授权测试应用后，才使用 `./scripts/test-native.sh --live-capture`。正式包拒绝 `--self-test`，仅保留不访问屏幕的 `--capture-policy-test`。
 
 QA 的 `--self-test` 使用在 `-O` 下仍生效的显式检查，失败返回非零退出码，结束后自动退出，不保存设置或位置，也不读取 Codex 状态。测试覆盖窗口尺寸、位置、显示隐藏、实际 GLSL 链接、48 组状态/风格/像素尺寸的 GPU 读回、阴影、透明边缘、动画暂停恢复及采集重连。生成的 PNG 仅使用无桌面背景的渲染，不含用户屏幕内容。已有录屏权限时还会测试真实屏幕采集；无权限时明确标记跳过。`scripts/test-native.sh` 额外验证故意失败会被正确报告。
 

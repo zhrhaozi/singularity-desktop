@@ -2,7 +2,11 @@ import Cocoa
 import SwiftUI
 
 enum SettingsTab: String, CaseIterable {
-    case appearance = "外观", motion = "运动", codex = "Codex 联动", lens = "桌面透镜", about = "关于"
+    case appearance = "外观"
+    case motion = "运动"
+    case codex = "Codex 联动"
+    case lens = "桌面透镜"
+    case about = "关于"
 }
 
 enum PetChoices {
@@ -26,8 +30,9 @@ private final class ParameterSliderCell: NSSliderCell {
         NSBezierPath(roundedRect: rail, xRadius: 2, yRadius: 2).fill()
         let middle = min(rail.maxX, max(rail.minX, knobRect(flipped: flipped).midX))
         let rtl = controlView?.userInterfaceLayoutDirection == .rightToLeft
-        let filled = NSRect(x: rtl ? middle : rail.minX, y: rail.minY,
-                            width: rtl ? rail.maxX - middle : middle - rail.minX, height: rail.height)
+        let filled = NSRect(
+            x: rtl ? middle : rail.minX, y: rail.minY,
+            width: rtl ? rail.maxX - middle : middle - rail.minX, height: rail.height)
         NSColor(srgbRed: 0.94, green: 0.73, blue: 0.43, alpha: isEnabled ? 1 : 0.45).setFill()
         NSBezierPath(roundedRect: filled, xRadius: 2, yRadius: 2).fill()
     }
@@ -49,22 +54,29 @@ private struct ParameterSlider: NSViewRepresentable {
     func makeNSView(context: Context) -> NSSlider {
         let slider = NSSlider(frame: .zero)
         slider.cell = ParameterSliderCell()
-        slider.target = context.coordinator; slider.action = #selector(Coordinator.change(_:))
+        slider.target = context.coordinator
+        slider.action = #selector(Coordinator.change(_:))
         slider.isContinuous = true
         slider.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return slider
     }
     func updateNSView(_ slider: NSSlider, context: Context) {
         context.coordinator.binding = $value
-        slider.minValue = range.lowerBound; slider.maxValue = range.upperBound
+        slider.minValue = range.lowerBound
+        slider.maxValue = range.upperBound
         if slider.doubleValue != value { slider.doubleValue = value }
-        slider.setAccessibilityLabel(label); slider.setAccessibilityValueDescription(display)
+        slider.setAccessibilityLabel(label)
+        slider.setAccessibilityValueDescription(display)
     }
 }
 
 private struct TrailingFieldStyle: LabeledContentStyle {
     func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 12) { configuration.label; Spacer(minLength: 8); configuration.content }
+        HStack(spacing: 12) {
+            configuration.label
+            Spacer(minLength: 8)
+            configuration.content
+        }
     }
 }
 
@@ -78,8 +90,10 @@ struct SettingsView: View {
     private let accent = Color(red: 0.94, green: 0.73, blue: 0.43)
     private let muted = Color.white.opacity(0.70)
     private let backdrop = Color(red: 0.055, green: 0.06, blue: 0.075)
-    private let palette = [("炽金", "#FFAA55"), ("霓虹紫", "#8A5CFF"), ("青蓝", "#4FD1FF"), ("玫红", "#FF4D6D"),
-                           ("极光绿", "#7CFFB2"), ("白色", "#FFFFFF"), ("淡金", "#FFD86B"), ("橙色", "#FF7A1A")]
+    private let palette = [
+        ("炽金", "#FFAA55"), ("霓虹紫", "#8A5CFF"), ("青蓝", "#4FD1FF"), ("玫红", "#FF4D6D"),
+        ("极光绿", "#7CFFB2"), ("白色", "#FFFFFF"), ("淡金", "#FFD86B"), ("橙色", "#FF7A1A"),
+    ]
 
     init(state: Model, initialTab: SettingsTab = .appearance) {
         self.state = state
@@ -89,7 +103,9 @@ struct SettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.horizontal, 24).padding(.top, 19)
-            if !state.rendererError.isEmpty { warning(state.rendererError).padding(.horizontal, 24).padding(.top, 10) }
+            if !state.rendererError.isEmpty {
+                warning(state.rendererError).padding(.horizontal, 24).padding(.top, 10)
+            }
             // The automatic macOS 15+ TabView expects a SwiftUI scene toolbar. This
             // AppKit-owned window instead exposes the same selection with native segments.
             Picker("设置分类", selection: $tab) {
@@ -98,24 +114,34 @@ struct SettingsView: View {
                 .padding(.horizontal, 24).padding(.vertical, 12)
             Divider()
             if #available(macOS 15, *) {
-                TabView(selection: $tab) { ForEach(SettingsTab.allCases, id: \.self) { page in tabPage(page).tag(page) } }
+                TabView(selection: $tab) {
+                    ForEach(SettingsTab.allCases, id: \.self) { page in tabPage(page).tag(page) }
+                }
             } else {
                 tabPage(tab).id(tab)
             }
         }
         .frame(minWidth: 520, minHeight: 600).background(backdrop)
-        .labeledContentStyle(TrailingFieldStyle()).preferredColorScheme(.dark).accentColor(accent).tint(accent).toggleStyle(.switch)
+        .labeledContentStyle(TrailingFieldStyle()).preferredColorScheme(.dark).accentColor(accent).tint(accent)
+        .toggleStyle(.switch)
         .confirmationDialog("恢复全部默认设置？", isPresented: $confirmReset, titleVisibility: .visible) {
-            Button("恢复默认", role: .destructive) { hexDraft = nil; state.reset(); appDelegate?.centerPet() }
+            Button("恢复默认", role: .destructive) {
+                hexDraft = nil
+                state.reset()
+                appDelegate?.centerPet()
+            }
             Button("取消", role: .cancel) {}
-        } message: { Text("外观、运动、桌面刷新和联动来源会恢复默认，桌宠将回到屏幕中央。此操作不能撤销。") }
+        } message: {
+            Text("外观、运动、桌面刷新和联动来源会恢复默认，桌宠将回到屏幕中央。此操作不能撤销。")
+        }
         .alert(item: $prompt) { which in
             switch which {
             case .desktop:
-                return Alert(title: Text("启用实验性桌面联动？"),
-                             message: Text("开放调试端口后，其他本机进程也可能访问已登录的 Codex。文件桥接不需要端口，奇点也不会替你开启端口。"),
-                             primaryButton: .default(Text("启用桌面联动")) { state.codexMode = .desktop },
-                             secondaryButton: .cancel(Text("取消")))
+                return Alert(
+                    title: Text("启用实验性桌面联动？"),
+                    message: Text("开放调试端口后，其他本机进程也可能访问已登录的 Codex。文件桥接不需要端口，奇点也不会替你开启端口。"),
+                    primaryButton: .default(Text("启用桌面联动")) { state.codexMode = .desktop },
+                    secondaryButton: .cancel(Text("取消")))
             }
         }
     }
@@ -148,13 +174,29 @@ struct SettingsView: View {
                     Text("Singularity").font(.system(size: 12)).foregroundStyle(muted)
                 }
                 HStack(spacing: 6) {
-                    statusLink(state.capturing ? "透镜已连接" : "透镜未连接", symbol: state.capturing ? "checkmark.circle.fill" : "circle.dashed", color: state.capturing ? .green : muted, target: .lens)
-                    statusLink("Codex · " + (state.codexState.label.components(separatedBy: " · ").first ?? state.codexState.token), symbol: "circle.hexagongrid", color: state.codexState == .error ? .orange : accent, target: .codex)
+                    statusLink(
+                        state.capturing ? "透镜已连接" : "透镜未连接",
+                        symbol: state.capturing ? "checkmark.circle.fill" : "circle.dashed",
+                        color: state.capturing ? .green : muted, target: .lens)
+                    statusLink(
+                        "Codex · "
+                            + (state.codexState.label.components(separatedBy: " · ").first ?? state.codexState.token),
+                        symbol: "circle.hexagongrid", color: state.codexState == .error ? .orange : accent,
+                        target: .codex)
                 }
                 HStack {
-                    Button { state.paused.toggle() } label: { Label(state.paused ? "继续流动" : "暂停流动", systemImage: state.paused ? "play.fill" : "pause.fill") }
-                    Button { appDelegate?.togglePet() } label: { Label(state.visible ? "隐藏" : "显示", systemImage: state.visible ? "eye.slash" : "eye") }
-                        .help(state.visible ? "隐藏桌宠并暂停桌面采样" : "重新显示桌宠")
+                    Button {
+                        state.paused.toggle()
+                    } label: {
+                        Label(
+                            state.paused ? "继续流动" : "暂停流动", systemImage: state.paused ? "play.fill" : "pause.fill")
+                    }
+                    Button {
+                        appDelegate?.togglePet()
+                    } label: {
+                        Label(state.visible ? "隐藏" : "显示", systemImage: state.visible ? "eye.slash" : "eye")
+                    }
+                    .help(state.visible ? "隐藏桌宠并暂停桌面采样" : "重新显示桌宠")
                 }
             }
             Spacer(minLength: 0)
@@ -162,10 +204,16 @@ struct SettingsView: View {
     }
 
     private func statusLink(_ text: String, symbol: String, color: Color, target: SettingsTab) -> some View {
-        Button { tab = target } label: {
-            Label { Text(text).foregroundStyle(muted) } icon: { Image(systemName: symbol).foregroundStyle(color) }
-                .padding(.horizontal, 8).padding(.vertical, 3)
-                .background(color.opacity(0.10), in: Capsule())
+        Button {
+            tab = target
+        } label: {
+            Label {
+                Text(text).foregroundStyle(muted)
+            } icon: {
+                Image(systemName: symbol).foregroundStyle(color)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(color.opacity(0.10), in: Capsule())
         }.buttonStyle(.plain).font(.system(size: 12)).help("前往" + target.rawValue)
     }
 
@@ -181,16 +229,23 @@ struct SettingsView: View {
         Text(text).font(.system(size: 12)).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true)
     }
     private func warning(_ text: String) -> some View {
-        Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: "exclamationmark.triangle.fill") }
-            .font(.system(size: 12)).foregroundStyle(Color.orange)
-            .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        Label {
+            Text(text).fixedSize(horizontal: false, vertical: true)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .font(.system(size: 12)).foregroundStyle(Color.orange)
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
     }
-    private func dial(_ name: String, _ value: Binding<Double>, _ spec: NumericSetting<Double>, _ display: String) -> some View {
+    private func dial(_ name: String, _ value: Binding<Double>, _ spec: NumericSetting<Double>, _ display: String)
+        -> some View
+    {
         HStack(spacing: 12) {
             Text(name).frame(width: 85, alignment: .leading)
             ParameterSlider(value: value, range: spec.range, label: name, display: display).frame(height: 18)
-            Text(display).font(.system(size: 12, design: .monospaced)).foregroundStyle(accent).frame(width: 63, alignment: .trailing)
+            Text(display).font(.system(size: 12, design: .monospaced)).foregroundStyle(accent).frame(
+                width: 63, alignment: .trailing)
         }
     }
 
@@ -203,7 +258,9 @@ struct SettingsView: View {
             HStack(spacing: 6) {
                 ForEach(PetChoices.styles.indices, id: \.self) { i in
                     let selected = state.style == i
-                    Button { state.style = i } label: {
+                    Button {
+                        state.style = i
+                    } label: {
                         VStack(spacing: 3) {
                             if let image = PetChoices.thumbnails[i] {
                                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
@@ -216,7 +273,9 @@ struct SettingsView: View {
                                 .foregroundStyle(selected ? accent : .white).padding(.bottom, 5)
                         }.frame(maxWidth: .infinity).background(Color.black.opacity(0.36))
                             .clipShape(RoundedRectangle(cornerRadius: 7))
-                            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(selected ? accent : .white.opacity(0.12), lineWidth: selected ? 1.5 : 1))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7).strokeBorder(
+                                    selected ? accent : .white.opacity(0.12), lineWidth: selected ? 1.5 : 1))
                     }.buttonStyle(.plain).accessibilityLabel("吸积盘风格：" + PetChoices.styles[i])
                         .accessibilityAddTraits(selected ? .isSelected : [])
                 }
@@ -235,13 +294,17 @@ struct SettingsView: View {
         section("黑洞分型") {
             LabeledContent("黑洞类型") {
                 Picker("黑洞类型", selection: $state.kind) {
-                    Text("史瓦西 · Schwarzschild").tag(0); Text("旋转 · Kerr").tag(1)
-                    Text("带电 · Reissner–Nordström").tag(2); Text("旋转带电 · Kerr–Newman").tag(3)
+                    Text("史瓦西 · Schwarzschild").tag(0)
+                    Text("旋转 · Kerr").tag(1)
+                    Text("带电 · Reissner–Nordström").tag(2)
+                    Text("旋转带电 · Kerr–Newman").tag(3)
                 }.labelsHidden().fixedSize()
             }
             dial("质量尺度", $state.mass, SettingsSpec.mass, String(format: "%.2f×", state.mass))
             if state.hasSpin { dial("自旋", $state.spin, SettingsSpec.spin, String(format: "%+.2f", state.spin)) }
-            if state.hasCharge { dial("电荷", $state.charge, SettingsSpec.charge, String(format: "%.2f", state.effectiveCharge)) }
+            if state.hasCharge {
+                dial("电荷", $state.charge, SettingsSpec.charge, String(format: "%.2f", state.effectiveCharge))
+            }
             if state.kind == 3 { note("这里显示有效电荷；自旋越强，可用电荷上限越低。") }
         }
     }
@@ -252,30 +315,54 @@ struct SettingsView: View {
                 ForEach(palette.indices, id: \.self) { index in
                     let (name, hex) = palette[index]
                     let rgb = RGB(hex: hex) ?? .amber
-                    Button { hexDraft = nil; state.colorHex = hex } label: {
+                    Button {
+                        hexDraft = nil
+                        state.colorHex = hex
+                    } label: {
                         ZStack {
-                            Circle().fill(Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b)).frame(width: 19, height: 19)
-                            if state.colorHex == hex { Image(systemName: "checkmark").font(.system(size: 11, weight: .bold)).foregroundStyle(Color.black) }
+                            Circle().fill(Color(.sRGB, red: rgb.r, green: rgb.g, blue: rgb.b)).frame(
+                                width: 19, height: 19)
+                            if state.colorHex == hex {
+                                Image(systemName: "checkmark").font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(Color.black)
+                            }
                         }.frame(width: 23, height: 23)
-                    }.buttonStyle(.plain).help(name).accessibilityLabel(name).accessibilityValue(state.colorHex == hex ? "已选中" : "未选中")
+                    }.buttonStyle(.plain).help(name).accessibilityLabel(name).accessibilityValue(
+                        state.colorHex == hex ? "已选中" : "未选中")
                 }
                 Spacer()
             }
             HStack {
-                ColorPicker("选取颜色", selection: Binding(get: {
-                    let c = state.customRGB; return Color(.sRGB, red: c.r, green: c.g, blue: c.b)
-                }, set: { color in
-                    guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
-                    let channels = [c.redComponent, c.greenComponent, c.blueComponent].map { Int((min(1, max(0, $0)) * 255).rounded()) }
-                    hexDraft = nil; state.colorHex = String(format: "#%02X%02X%02X", channels[0], channels[1], channels[2])
-                }), supportsOpacity: false)
-                Spacer(); Text("HEX").font(.system(size: 12)).foregroundStyle(muted)
-                TextField("#RRGGBB", text: Binding(get: { hexDraft ?? state.colorHex }, set: { text in
-                    hexDraft = text
-                    if let rgb = RGB(hex: text) { state.colorHex = rgb.hex }
-                })).textFieldStyle(.roundedBorder).font(.system(size: 13, design: .monospaced)).frame(width: 98)
-                    .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(
-                        hexDraft.map { RGB(hex: $0) == nil } == true ? Color.red : .clear, lineWidth: 1))
+                ColorPicker(
+                    "选取颜色",
+                    selection: Binding(
+                        get: {
+                            let c = state.customRGB
+                            return Color(.sRGB, red: c.r, green: c.g, blue: c.b)
+                        },
+                        set: { color in
+                            guard let c = NSColor(color).usingColorSpace(.sRGB) else { return }
+                            let channels = [c.redComponent, c.greenComponent, c.blueComponent].map {
+                                Int((min(1, max(0, $0)) * 255).rounded())
+                            }
+                            hexDraft = nil
+                            state.colorHex = String(format: "#%02X%02X%02X", channels[0], channels[1], channels[2])
+                        }), supportsOpacity: false)
+                Spacer()
+                Text("HEX").font(.system(size: 12)).foregroundStyle(muted)
+                TextField(
+                    "#RRGGBB",
+                    text: Binding(
+                        get: { hexDraft ?? state.colorHex },
+                        set: { text in
+                            hexDraft = text
+                            if let rgb = RGB(hex: text) { state.colorHex = rgb.hex }
+                        })
+                ).textFieldStyle(.roundedBorder).font(.system(size: 13, design: .monospaced)).frame(width: 98)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5).strokeBorder(
+                            hexDraft.map { RGB(hex: $0) == nil } == true ? Color.red : .clear, lineWidth: 1)
+                    )
                     .focused($editingHex).onChange(of: editingHex) { if !$0 { hexDraft = nil } }
                     .accessibilityLabel("十六进制颜色")
             }
@@ -294,23 +381,38 @@ struct SettingsView: View {
                 dial("公转速度", $state.orbitSpeed, SettingsSpec.orbitSpeed, String(format: "%.2f×", state.orbitSpeed))
                 switchRow("系统漂移", $state.systemDrift)
                 Button("重置轨道") { appDelegate?.view?.resetOrbits() }.help("只重置天体的位置和速度，保留外观设置")
-            } else { note("切换到双体或三体，即可调整公转和系统漂移。") }
+            } else {
+                note("切换到双体或三体，即可调整公转和系统漂移。")
+            }
         }
         section("流动与漫游") {
             dial("流动速度", $state.speed, SettingsSpec.speed, String(format: "%.1f×", state.speed))
-            switchRow("桌面随机漫游", Binding(get: { state.effectiveWander }, set: { state.wander = $0 })).disabled(state.reduceMotion)
+            switchRow("桌面随机漫游", Binding(get: { state.effectiveWander }, set: { state.wander = $0 })).disabled(
+                state.reduceMotion)
             if state.reduceMotion { note("系统已开启“减少动态效果”：漫游暂停，流动以所选速度的 40% 播放。关闭后恢复原设置。") }
-            if state.effectiveWander { dial("移动速度", $state.travelSpeed, SettingsSpec.travelSpeed, "\(Int(state.travelSpeed)) pt/s") }
+            if state.effectiveWander {
+                dial("移动速度", $state.travelSpeed, SettingsSpec.travelSpeed, "\(Int(state.travelSpeed)) pt/s")
+            }
             note("漫游限于当前屏幕。鼠标靠近、拖动或打开设置时暂停；关闭设置后继续。")
         }
     }
 
     @ViewBuilder private var codex: some View {
         section("状态来源") {
-            Picker("状态来源", selection: Binding(get: { state.codexMode }, set: { mode in
-                if mode == .desktop && state.codexMode != .desktop { prompt = .desktop } else { state.codexMode = mode }
-            })) {
-                Text("文件桥接（推荐）").tag(CodexLinkMode.file); Text("手动预览").tag(CodexLinkMode.manual)
+            Picker(
+                "状态来源",
+                selection: Binding(
+                    get: { state.codexMode },
+                    set: { mode in
+                        if mode == .desktop && state.codexMode != .desktop {
+                            prompt = .desktop
+                        } else {
+                            state.codexMode = mode
+                        }
+                    })
+            ) {
+                Text("文件桥接（推荐）").tag(CodexLinkMode.file)
+                Text("手动预览").tag(CodexLinkMode.manual)
                 Text("桌面调试（实验）").tag(CodexLinkMode.desktop)
             }.labelsHidden().fixedSize()
             switch state.codexMode {
@@ -321,20 +423,32 @@ struct SettingsView: View {
         }
         section("当前状态") {
             if state.codexMode == .manual {
-                Picker("预览状态", selection: Binding(get: { state.codexState }, set: { state.setCodexState($0, source: "手动预览") })) {
+                Picker(
+                    "预览状态",
+                    selection: Binding(get: { state.codexState }, set: { state.setCodexState($0, source: "手动预览") })
+                ) {
                     ForEach(CodexActivityState.allCases, id: \.rawValue) { Text($0.label).tag($0) }
                 }
-            } else { LabeledContent("状态", value: state.codexState.label) }
+            } else {
+                LabeledContent("状态", value: state.codexState.label)
+            }
             LabeledContent("来源", value: state.codexSource)
             if !state.codexDetail.isEmpty { note(state.codexDetail) }
         }
         if state.codexMode != .manual {
             section("发送一个完成事件") {
-                HStack { Text("singularity-codex-state complete").font(.system(size: 12, design: .monospaced)).textSelection(.enabled); Spacer()
+                HStack {
+                    Text("singularity-codex-state complete").font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                    Spacer()
                     Button("复制命令") {
-                        guard let path = Bundle.main.url(forResource: "singularity-codex-state", withExtension: nil)?.path else { return }
+                        guard
+                            let path = Bundle.main.url(forResource: "singularity-codex-state", withExtension: nil)?
+                                .path
+                        else { return }
                         let command = "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "' complete"
-                        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(command, forType: .string)
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(command, forType: .string)
                     }
                 }
                 Label("关于这个命令", systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(muted)
@@ -345,7 +459,9 @@ struct SettingsView: View {
     }
 
     private static func openScreenSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
     }
     @ViewBuilder private var lensMore: some View {
         Button(state.capturing ? "重新连接" : "检查权限并连接") { appDelegate?.enableCapture(retryPreferredBackend: true) }
@@ -367,19 +483,27 @@ struct SettingsView: View {
                     if !state.captureAuthorized {
                         Button("打开屏幕录制设置", action: Self.openScreenSettings)
                     } else {
-                        Button("连接桌面透镜") { appDelegate?.enableCapture(requestPermission: false, retryPreferredBackend: true) }
-                            .disabled(!state.visible || !state.rendererError.isEmpty)
+                        Button("连接桌面透镜") {
+                            appDelegate?.enableCapture(requestPermission: false, retryPreferredBackend: true)
+                        }
+                        .disabled(!state.visible || !state.rendererError.isEmpty)
                     }
                     Spacer()
-                    Menu { lensMore } label: { Image(systemName: "ellipsis.circle") }
-                        .fixedSize().accessibilityLabel("更多桌面透镜选项")
+                    Menu {
+                        lensMore
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .fixedSize().accessibilityLabel("更多桌面透镜选项")
                 }
                 if !state.visible { note("先显示桌宠，再连接桌面透镜。") }
             }
         }
         section("背景刷新") {
             Picker("背景刷新频率", selection: $state.backgroundFPS) {
-                Text("自动 · 2–10 FPS").tag(10); Text("均衡 · 15 FPS").tag(15); Text("流畅 · 30 FPS").tag(30)
+                Text("自动 · 2–10 FPS").tag(10)
+                Text("均衡 · 15 FPS").tag(15)
+                Text("流畅 · 30 FPS").tag(30)
             }.labelsHidden().pickerStyle(.segmented)
             note("只改变桌面背景的刷新频率，不改变黑洞动画速度。屏幕画面仅在本机内存中用于渲染，不录制、不上传。")
         }
@@ -407,9 +531,15 @@ struct SettingsView: View {
             LabeledContent("打开设置", value: "双击黑洞，或在应用内按 ⌘ ,")
             LabeledContent("快捷操作", value: "右键黑洞或点按菜单栏图标")
             ForEach(PetShortcut.allCases, id: \.rawValue) { action in
-                LabeledContent(action.title, value: state.unavailableShortcutIDs.contains(action.rawValue) ? action.label + "（不可用）" : action.label)
+                LabeledContent(
+                    action.title,
+                    value: state.unavailableShortcutIDs.contains(action.rawValue)
+                        ? action.label + "（不可用）" : action.label)
             }
-            Button("再看初次使用引导") { state.showOnboarding(); tab = .appearance }
+            Button("再看初次使用引导") {
+                state.showOnboarding()
+                tab = .appearance
+            }
             note("暂停会停止流动、公转和漫游；隐藏还会暂停桌面采样。")
         }
         section("默认设置") { Button("恢复全部默认设置…") { confirmReset = true } }

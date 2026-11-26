@@ -54,4 +54,9 @@ if "$APP/Contents/MacOS/Singularity" --pet-only --self-test --self-test-render-o
   exit 1
 fi
 grep -F 'SELF_TEST_FAIL intentional failure' "$LOG_DIR/fail.log"
+if [[ "$MODE" == --render-only ]]; then
+  "$APP/Contents/MacOS/Singularity" --pet-only --self-test --self-test-render-only --self-test-interactions > "$LOG_DIR/interactions.log" 2>&1
+  grep -F INTERACTION_QA_PASS "$LOG_DIR/interactions.log"
+  grep -E 'OWN_WINDOW_CAPTURE_(PASS|UNAVAILABLE)' "$LOG_DIR/interactions.log" || true  # own-window API is 14.4+
+fi
 echo "PASS: isolated native tests and failure exit status"

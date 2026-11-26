@@ -1,5 +1,5 @@
-import Foundation
 import Combine
+import Foundation
 
 /// Publishes values after a validated load. UI/renderer side effects belong to the coordinator.
 final class Model: ObservableObject, CodexStateModel {
@@ -86,14 +86,17 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var unavailableShortcutIDs: Set<UInt32> = []
     @Published private(set) var needsOnboarding = false
     func showOnboarding() { needsOnboarding = true }
-    func finishOnboarding() { needsOnboarding = false; defaults?.set(true, forKey: "onboarded") }
+    func finishOnboarding() {
+        needsOnboarding = false
+        defaults?.set(true, forKey: "onboarded")
+    }
     @Published var paused = false { didSet { changes.send(.redraw) } }
     @Published var visible = true
     @Published var captureState = "尚未开启桌面透镜"
     @Published var captureAuthorized = false
     @Published var capturing = false
-    @Published var error = "" // Screen-capture lifecycle only.
-    @Published var rendererError = "" // Must survive capture-state updates.
+    @Published var error = ""  // Screen-capture lifecycle only.
+    @Published var rendererError = ""  // Must survive capture-state updates.
 
     var sceneSize: Double { size * (bodyCount == 1 ? 1 : (bodyCount == 2 ? 1.75 : 1.9)) }
     var hasSpin: Bool { kind == 1 || kind == 3 }
@@ -143,14 +146,17 @@ final class Model: ObservableObject, CodexStateModel {
     }
 
     func flushPreferences() {
-        saveWork?.cancel(); saveWork = nil
+        saveWork?.cancel()
+        saveWork = nil
         for (key, value) in pending { defaults?.set(value, forKey: key) }
         pending.removeAll(keepingCapacity: true)
     }
 
     func setCodexState(_ next: CodexActivityState, source: String, detail: String = "") {
         let changed = codexState != next
-        codexState = next; codexSource = source; codexDetail = detail
+        codexState = next
+        codexSource = source
+        codexDetail = detail
         if changed {
             changes.send(.redraw)
             if next == .complete || next == .error { codexPulse = 1 }
@@ -172,14 +178,23 @@ final class Model: ObservableObject, CodexStateModel {
         charge = SettingsSpec.charge.initial
         mass = SettingsSpec.mass.initial
         travelSpeed = SettingsSpec.travelSpeed.initial
-        systemDrift = true; wander = false; customColor = false; colorHex = RGB.amber.hex
-        backgroundFPS = 10; paused = false; codexPulse = 0
+        systemDrift = true
+        wander = false
+        customColor = false
+        colorHex = RGB.amber.hex
+        backgroundFPS = 10
+        paused = false
+        codexPulse = 0
         codexMode = .file
         setCodexState(.idle, source: codexMode.waitingLabel)
         // A deliberate reset also clears invalid stored values that already displayed their fallback.
-        saveWork?.cancel(); saveWork = nil; pending.removeAll()
-        for key in ["size", "lens", "speed", "brightness", "tilt", "roll", "spin", "charge", "mass", "travelSpeed",
-                    "orbitSpeed", "bodyCount", "kind", "style", "systemDrift", "wander", "customColor", "colorHex",
-                    "backgroundFPS", "codexAuto", "codexLinkMode"] { defaults?.removeObject(forKey: key) }
+        saveWork?.cancel()
+        saveWork = nil
+        pending.removeAll()
+        for key in [
+            "size", "lens", "speed", "brightness", "tilt", "roll", "spin", "charge", "mass", "travelSpeed",
+            "orbitSpeed", "bodyCount", "kind", "style", "systemDrift", "wander", "customColor", "colorHex",
+            "backgroundFPS", "codexAuto", "codexLinkMode",
+        ] { defaults?.removeObject(forKey: key) }
     }
 }
