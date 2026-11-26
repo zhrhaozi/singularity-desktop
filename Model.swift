@@ -4,7 +4,7 @@ import Combine
 /// Publishes values after a validated load. UI/renderer side effects belong to the coordinator.
 final class Model: ObservableObject, CodexStateModel {
     enum Change { case redraw, size, bodyCount, drift, position, cadence, codexMode }
-    var onChange: ((Change) -> Void)?
+    let changes = PassthroughSubject<Change, Never>()
     private let defaults: UserDefaults?
     private var pending: [String: Any] = [:]
     private var saveWork: DispatchWorkItem?
@@ -80,7 +80,7 @@ final class Model: ObservableObject, CodexStateModel {
     @Published var codexSource = CodexLinkMode.file.waitingLabel
     @Published var codexDetail = ""
     @Published var codexPulse: Double = 0
-    @Published var paused = false { didSet { onChange?(.redraw) } }
+    @Published var paused = false { didSet { changes.send(.redraw) } }
     @Published var visible = true
     @Published var captureState = "尚未开启桌面透镜"
     @Published var capturing = false
@@ -130,7 +130,7 @@ final class Model: ObservableObject, CodexStateModel {
             saveWork = work
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: work)
         }
-        onChange?(effect)
+        changes.send(effect)
     }
 
     func flushPreferences() {
@@ -143,7 +143,7 @@ final class Model: ObservableObject, CodexStateModel {
         let changed = codexState != next
         codexState = next; codexSource = source; codexDetail = detail
         if changed {
-            onChange?(.redraw)
+            changes.send(.redraw)
             if next == .complete || next == .error { codexPulse = 1 }
         }
     }

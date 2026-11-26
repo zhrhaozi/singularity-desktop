@@ -12,9 +12,10 @@ final class AppDelegate:NSObject,NSApplicationDelegate,NSWindowDelegate,NSMenuDe
     var status:NSStatusItem!
     let capture=Capture()
     var codexBridge:CodexStateBridge?
+    private var preferenceObservation: AnyCancellable?
     private var pendingResize: DispatchWorkItem?
     private func observePreferences() {
-        model.onChange = { [weak self] change in
+        preferenceObservation = model.changes.sink { [weak self] change in
             guard let self else { return }
             switch change {
             case .size:
