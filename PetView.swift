@@ -306,7 +306,7 @@ final class PetView: NSOpenGLView {
         let mouse = NSEvent.mouseLocation
         let pointer = w.convertPoint(fromScreen: mouse)
         let hovering = !RunMode.performance && hitsBody(pointer, margin: 0.29)
-        if model.bodyCount > 1 && !model.paused && !dragging && !hovering {
+        if orbits != nil && !model.paused && !dragging && !hovering {
             orbits?.advance(dt: dt, speed: model.orbitSpeed)
         }
         if model.effectiveWander && !model.paused && !dragging && !hovering
@@ -340,7 +340,7 @@ final class PetView: NSOpenGLView {
         }
     }
     func hitsBody(_ point: CGPoint, margin: Double) -> Bool {
-        guard model.bodyCount > 1 else {
+        guard orbits != nil else {
             return hypot(point.x - bounds.midX, point.y - bounds.midY) < bounds.width * margin
         }
         return orbitalBodies.contains {
@@ -436,11 +436,8 @@ final class PetView: NSOpenGLView {
                 y: (sourceRect.maxY - w.frame.maxY) / sourceRect.height,
                 width: w.frame.width / sourceRect.width, height: w.frame.height / sourceRect.height)
         }
-        if model.bodyCount > 1, bodyPass == nil, let geometry = geometryCache {
-            if orbits == nil {
-                orbits = OrbitalSystem(count: model.bodyCount)
-                orbits?.driftEnabled = model.systemDrift
-            }
+        // Render and hit-test the applied scene, not an intermediate selection pending its resize.
+        if orbits != nil, bodyPass == nil, let geometry = geometryCache {
             let desktop = LensDesktop(
                 texture: textureID,
                 surface: desktopSurface.map { CVOpenGLTextureGetName($0) } ?? emptySurfaceTexture,

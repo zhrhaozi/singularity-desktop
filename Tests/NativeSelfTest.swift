@@ -48,11 +48,20 @@ enum NativeSelfTest {
             require(abs(app.pet.frame.width-size)<1,"resize \(size)")
         }
         if let screen=app.pet.screen ?? NSScreen.main {
+            let previousWidth = app.pet.frame.width
             model.size=280
             app.pet.setFrameOrigin(CGPoint(x:screen.visibleFrame.maxX-280,y:screen.visibleFrame.midY-140))
-            model.bodyCount=3
+            model.bodyCount=2; model.bodyCount=3
+            require(app.pet.frame.width == previousWidth && app.view.orbits == nil, "burst does not immediately resize or allocate a transient orbit")
+            for _ in 0..<80 where abs(app.pet.frame.width-model.sceneSize) >= 1 { try? await Task.sleep(nanoseconds:25_000_000) }
+            require(abs(app.pet.frame.width-model.sceneSize)<1 && app.view.orbitalBodies.count==3, "coalesced resize applies only the final body count")
             require(app.pet.frame.origin==PetPlacement.recoveredOrigin(for:app.pet.frame,screens:app.petScreens),
                     "switching to a larger system keeps the window on an available screen")
+            let existing = app.view.orbits
+            model.bodyCount=2; model.size=300; model.bodyCount=3
+            for _ in 0..<80 where abs(app.pet.frame.width-model.sceneSize) >= 1 { try? await Task.sleep(nanoseconds:25_000_000) }
+            require(abs(app.pet.frame.width-model.sceneSize)<1 && app.view.orbits === existing, "net-unchanged body count keeps the live orbit across a size change")
+            log("SCENE_DEBOUNCE_PASS size and body count coalesce; no intermediate orbit or lost trajectory")
             model.bodyCount=1
         }
         model.size=oldSize
@@ -71,7 +80,7 @@ enum NativeSelfTest {
         require(linked==1,"GL link status")
         shaderFailureChecks()
         renderChecks(app.view)
-        multiBodyRenderChecks(app.view)
+        multiBodyRenderChecks(app)
         CapturePolicyDiagnostic.run()
         await snapshotPixelChecks()
         if RunMode.renderOnly {
@@ -682,12 +691,12 @@ enum NativeSelfTest {
     @MainActor static func multiBodyCaptureChecks(_ app:AppDelegate,screen:NSScreen) async {
         let oldCount=model.bodyCount,oldPaused=model.paused,origin=app.pet.frame.origin
         defer {
-            model.bodyCount=oldCount;model.paused=oldPaused
+            model.bodyCount=oldCount;model.paused=oldPaused;app.resizePet()
             app.pet.setFrameOrigin(origin);app.checkScreen()
         }
         model.paused=true
         for count in [2,3] {
-            model.bodyCount=count
+            model.bodyCount=count;app.resizePet()
             app.pet.setFrameOrigin(CGPoint(x:screen.visibleFrame.midX-app.pet.frame.width/2,
                                           y:screen.visibleFrame.midY-app.pet.frame.height/2))
             await app.capture.retarget(screen:screen)
@@ -1125,7 +1134,10 @@ enum NativeSelfTest {
         } catch {require(false,"PNG output: \(error)")}
     }
 
-    static func multiBodyRenderChecks(_ view:PetView) {
+    static func multiBodyRenderChecks(_ app:AppDelegate) {
+        let view: PetView = app.view
+        // This synchronous pixel fixture needs the final window geometry for each sample; the real debounce is tested above.
+        func selectCount(_ count:Int) { model.bodyCount=count;app.resizePet() }
         let oldCount=model.bodyCount,oldSize=model.size,oldCapture=model.capturing
         let oldRect=view.capture.screenRect,oldOrigin=view.window?.frame.origin
         var previous:GLint=0,fbo:GLuint=0,color:GLuint=0
@@ -1133,7 +1145,7 @@ enum NativeSelfTest {
         glGenFramebuffers(1,&fbo);glGenTextures(1,&color)
         glBindFramebuffer(GLenum(GL_FRAMEBUFFER),fbo)
         defer {
-            model.bodyCount=oldCount;model.size=oldSize;model.capturing=oldCapture
+            model.size=oldSize;selectCount(oldCount);model.capturing=oldCapture
             if let oldOrigin {view.window?.setFrameOrigin(oldOrigin)}
             view.capture.screenRect=oldRect
             view.uploaded=nil
@@ -1166,12 +1178,12 @@ enum NativeSelfTest {
             require(glGetError()==GL_NO_ERROR,"multi framebuffer render/readback")
             return data
         }
-        model.bodyCount=1;model.style=0;model.kind=0;model.mass=0.85;model.tilt=1.30;model.roll=0.12
+        selectCount(1);model.style=0;model.kind=0;model.mass=0.85;model.tilt=1.30;model.roll=0.12
         model.setCodexState(.idle,source:"multi-self-test");model.codexPulse=0
         let single=pixels(560)
         var cases=0
         for count in [2,3] {
-            model.bodyCount=count
+            selectCount(count)
             require(view.orbitalBodies.count==count,"body count \(count)")
             for size in [280,560,1120] {
                 for style in 0...3 {
@@ -1231,7 +1243,7 @@ enum NativeSelfTest {
             require(view.orbitalBodies.contains(where:{$0.impact>0.1}),"multi contact produces a collision pulse")
             savePNG(pixels(560),size:560,name:"multi-\(count)-collision")
         }
-        model.bodyCount=1;model.style=0
+        selectCount(1);model.style=0
         // Animation has advanced, so compare the reference at the same phases instead.
         let restored=pixels(560),reference=pixels(560,uncached:true)
         require((zip(restored,reference).map{abs(Int($0)-Int($1))}.max() ?? 0)<=2,"single path remains valid after switching")

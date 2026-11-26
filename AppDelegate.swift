@@ -22,14 +22,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         preferenceObservation = model.changes.sink { [weak self] change in
             guard let self else { return }
             switch change {
-            case .size:
+            case .size, .bodyCount:
                 self.pendingResize?.cancel()
                 let work = DispatchWorkItem { [weak self] in self?.resizePet() }
                 self.pendingResize = work
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(120), execute: work)
-            case .bodyCount:
-                self.view?.resetOrbits()
-                self.resizePet()
             case .drift: self.view?.orbits?.driftEnabled = model.systemDrift
             case .position: self.savePosition()
             case .cadence: self.checkScreen()
@@ -308,6 +305,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         pendingResize?.cancel()
         pendingResize = nil
         guard pet != nil else { return }
+        // Apply the latest orbit and window sizes together; a rapid round-trip keeps the existing orbit.
+        if let view, (view.orbits?.bodies.count ?? 1) != model.bodyCount { view.resetOrbits() }
         let center = NSPoint(x: pet.frame.midX, y: pet.frame.midY)
         let side = model.sceneSize
         var frame = NSRect(x: center.x - side / 2, y: center.y - side / 2, width: side, height: side)
